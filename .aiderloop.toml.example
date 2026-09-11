@@ -1,0 +1,21 @@
+# Copy to .aiderloop.toml in a project and edit. Every field is optional.
+
+[model]
+# Ollama name of the model aider writes with (no "ollama/" prefix). Used to
+# free its VRAM before a review call -- on a single GPU the reviewer
+# otherwise queues behind it and can exceed the review timeout.
+author = "qwen25-coder-aider"
+# Default for --review-model. Ideally a DIFFERENT family from `author`;
+# a model reviewing its own family shares its blind spots.
+review = "qwen2.5-coder:7b"
+
+[validate]
+# Built-in syntax checkers, run over the files each item changed.
+# Omit to enable "python" and "js-html". "npm-build" runs `npm run build`.
+checks = ["python", "js-html"]
+# Project-wide gate, always run in full. Shell strings, cwd = project dir.
+commands = [".venv/bin/pytest tests/test_fast.py -q"]
+
+[preflight]
+# Warn about files this size or larger that aren't in .aiderignore.
+max_file_bytes = 262144
