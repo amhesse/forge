@@ -255,7 +255,8 @@ def check_ollama_context(log_path: Path, model_name: str | None = None) -> None:
         log(f"Ollama context check failed (non-fatal): {e}", log_path)
 
 
-def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path) -> tuple[bool, str]:
+def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path,
+                      files: list[str] | None = None) -> tuple[bool, str]:
     """
     Runs Aider once in architect mode with a message instructing it to plan
     and implement the given todo item (or, when called from the validation
@@ -292,6 +293,16 @@ def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path) -> tupl
         # before a file block, so aider applied nothing -- and a whole-file
         # edit costs two copies of the file out of the context window.
         "--edit-format", cfg("model", "edit_format", default="diff"),
+        # The files the item named, handed over as editable up front.
+        # Without this, aider opens with "which files should I add?" and a
+        # thinking model answers it in prose -- measured on a real run:
+        # qwen3.8:27b spent four minutes and three reflections explaining
+        # which files it *would* add ("stories/index.json, if it is not
+        # already editable in the chat"), emitted no edit block at all, and
+        # aider stopped with "Only 3 reflections allowed". 12k tokens sent,
+        # 1.6k received, nothing written. The loop already parses these
+        # paths for the touched-files check; it just wasn't telling aider.
+        *[arg for f in (files or []) for arg in ("--file", f)],
         "--message", prompt,
     ]
 
@@ -1006,20 +1017,25 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
                   keep_branch=(status != STATUS_DONE) or args.keep_branches)
         return status, record
 
+    # Parsed before the run, not after: these are both what aider is handed
+    # as editable and what the touched-files check later holds it to.
+    expected = expected_files(item.text)
+    if expected:
+        log(f"Handing aider the file(s) the item named: {expected}", log_path)
+
     success = False
     attempt = 0
     while attempt <= args.max_retries and not success:
         attempt += 1
         if attempt > 1:
             log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
-        success, _ = run_aider_on_item(worktree_path, item.text, log_path)
+        success, _ = run_aider_on_item(worktree_path, item.text, log_path, files=expected)
     record["aider_attempts"] = attempt
 
     if not success:
         log(f"Aider failed after {attempt} attempt(s), parking blocked: {item.text}", log_path)
         return finish(STATUS_BLOCKED, f"aider itself failed after {attempt} attempt(s)")
 
-    expected = expected_files(item.text)
     restore_unnamed_files(worktree_path, base, expected, log_path)
     if wt.restore_todo(worktree_path, base, args.todo_file):
         log(f"Item edited {args.todo_file}; restored it (the checklist is the "
@@ -1064,7 +1080,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
             f"Validation failure output:\n{validation_msg}\n\n"
             f"Fix the failure above while still completing the original task. "
             f"Do not revert or abandon the original change; correct it."
-        ), log_path)
+        ), log_path, files=expected)
         if not fix_success:
             log(f"Aider itself failed during the validation-fix retry for: {item.text}", log_path)
             break
