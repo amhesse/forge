@@ -184,10 +184,20 @@ def build_prompt(goal: str, context: str) -> str:
 # goal is a human's one-line request, not a checklist item, and asking
 # for backticks there is an easy rule to forget.
 _GOAL_PATH_RE = re.compile(r"([\w./-]*[\w-]\.[A-Za-z][A-Za-z0-9]{0,7})")
-_MAX_SOURCE_FILE_BYTES = 16000  # a file bigger than this dominates the
-                                 # prompt for no benefit at drafting time;
-                                 # see aider_loop's own preflight check for
-                                 # the same tradeoff on the coding side.
+# 16000 was the original guess here and turned out too conservative on
+# real contact with a real project: voltagedrop's index.html - a single
+# monolithic page, exactly the shape a small single-file project
+# legitimately has - is 25.6KB, comfortably over that cap, and got
+# refused inclusion for no real reason. The drafting model has a 32768
+# token context window; even a dense 40KB of source is a fraction of
+# that budget once the rest of the prompt (system rules, checklist,
+# goal) is accounted for. 40000 leaves real headroom while still
+# catching the case this exists for - a file that would actually
+# dominate the prompt, like the 3MB CSV fixtures aider_loop's own
+# preflight check warns about (see its DEFAULT_MAX_FILE_BYTES, which
+# targets a much larger problem: files that blow the CODING model's
+# context during editing, not the drafting model's context here).
+_MAX_SOURCE_FILE_BYTES = 40000
 
 
 def gather_context(project_dir: Path, todo_path: Path, goal: str,
