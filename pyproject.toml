@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge"
+version = "0.1.0"
+description = "An unattended local-model coding loop: worktree-isolated items, TDD mode, concurrent workers, difficulty routing, and a from-scratch editor as an alternative to aider."
+readme = "README.md"
+requires-python = ">=3.11"
+# Stdlib only, deliberately - see README's "What it is not" section. The
+# only non-stdlib things this project ever shells out to (aider, git,
+# ollama) are external programs, not Python dependencies, so a project
+# using this loop never needs a venv just to run it.
+dependencies = []
+
+[project.scripts]
+forge = "forge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# NOTE: the name "forge" collides with the Foundry Ethereum toolchain's
+# `forge` binary, which is common enough on developer machines that it's
+# worth naming here rather than finding out the hard way. Nothing on
+# this machine currently installs that binary, but check `command -v
+# forge` before relying on this package's console script if Foundry is
+# ever added - whichever installs second wins the PATH entry, silently.

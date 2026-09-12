@@ -55,8 +55,8 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
-import lite_editor
-import worktree as wt
+from . import lite_editor
+from . import worktree as wt
 
 CHECKBOX_RE = re.compile(r"^(?P<indent>\s*)-\s\[(?P<mark>[ xX!?])\]\s(?P<text>.+)$")
 

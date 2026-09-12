@@ -56,7 +56,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-import aider_loop as al
+from . import aider_loop as al
 
 # qwen3.8-aider (27B) was the obvious first choice for a planning role -
 # it's the model this project has that's meant to reason, not just write

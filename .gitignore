@@ -1,6 +1,10 @@
-__pycache__/
-*.pyc
-aider_loop.log
 .aider.chat.history.md
 .aider.input.history
+aider_loop.log
 .aider.tags.cache.v4/
+build/
+dist/
+*.egg-info/
+*.pyc
+__pycache__/
+.venv/

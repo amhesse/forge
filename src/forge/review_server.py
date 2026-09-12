@@ -54,7 +54,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-import worktree as wt
+from . import worktree as wt
 
 DEFAULT_PORT = 8765
 BRANCH_PREFIX = "aider-loop/"

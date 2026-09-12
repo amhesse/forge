@@ -1,7 +1,34 @@
-# aider-loop
+# forge
 
-Runs [aider](https://aider.chat) unattended against a markdown checklist, with
-a safety net between each item and the next.
+Runs [aider](https://aider.chat) — or a from-scratch alternative editor built
+into this project, see *Editing backend* below — unattended against a
+markdown checklist, with a safety net between each item and the next.
+
+    pipx install -e .        # or: pip install -e . --break-system-packages
+    forge run --project-dir ~/projects/thing --todo-file TODO.md
+    forge draft --project-dir ~/projects/thing --goal "..."
+    forge review --project-dir ~/projects/thing
+
+Stdlib only — no dependency ever needs installing for the package itself,
+only for the project you point it at. `pipx` is the right tool on a
+system that blocks bare `pip install` (PEP 668, the default on Arch and
+other recent distros): it builds an isolated environment for `forge` and
+still puts a single `forge` command on your PATH.
+
+Was `aider-loop`, when driving aider was the only option; renamed once a
+second editing backend made that name inaccurate. The old name still
+works as a directory symlink and the old script names still exist as
+`forge/aider_loop.py` etc. inside the package, so nothing that referenced
+them elsewhere silently broke. Item branches (`aider-loop/item-N-<date>`)
+and the cache directory (`~/.cache/aider-loop/<project>/`) still use the
+old name too, deliberately - renaming those would orphan every branch
+and run record any project made under the old name, for a purely
+cosmetic gain.
+
+**Naming collision to know about:** `forge` is also the command name for
+Foundry's Ethereum/Solidity toolchain. Nothing on this machine currently
+installs that binary; if it ever does, whichever installs second wins the
+PATH entry, silently. `command -v forge` before relying on either.
 
 The loop itself is simple: take the next unchecked item, hand it to aider,
 check what came back, mark it and move on. The value is in the checking. A
@@ -9,7 +36,7 @@ local model will confidently produce work that is wrong in ways that still
 compile, and the checks below exist because each one caught a real failure
 that the previous checks missed.
 
-A separate tool, `spec_compiler.py`, drafts the checklist items themselves
+A separate command, `forge draft`, drafts the checklist items themselves
 from a vague goal - see its own section below. It exists because writing
 items in the shape below is most of what makes them reliable, and that
 shape is tedious enough by hand that skipping it is the easy mistake.
@@ -20,7 +47,7 @@ failure is never applied at all, so there is nothing to undo and no reason
 to stop — the run keeps going, and each parked item's work is left on its
 own branch to read in the morning.
 
-    aider_loop.py --project-dir ~/projects/thing --todo-file TODO.md
+    forge run --project-dir ~/projects/thing --todo-file TODO.md
 
 ## What it checks, in order
 
@@ -105,9 +132,9 @@ Your checklist and `aider_loop.log` are excused: both are the loop's own
 bookkeeping, neither can reach a merge, and being told to commit your todo
 list before the loop will read it is backwards.
 
-## Reviewing what got parked: review_server.py
+## Reviewing what got parked: `forge review`
 
-    python review_server.py --project-dir ~/projects/blockroad
+    forge review --project-dir ~/projects/blockroad
 
 Then open http://127.0.0.1:8765/. A page listing every branch
 `git branch --list 'aider-loop/*'` currently has: the item's own text,
@@ -143,12 +170,12 @@ unintended ref.
 
 No login, no token: there's nothing reachable here that isn't already a
 `git` command sitting in your own shell history, and it binds to
-`127.0.0.1` only. Stdlib only, like `aider_loop.py` itself — a browser
+`127.0.0.1` only. Stdlib only, like the rest of this project — a browser
 tab and a project directory are the only things this needs.
 
 ## Parallel workers
 
-    python aider_loop.py --project-dir ~/projects/thing --models qwen25-coder-aider,qwen2.5-coder:7b
+    forge run --project-dir ~/projects/thing --models qwen25-coder-aider,qwen2.5-coder:7b
 
 One model name changes which model runs (still one item at a time,
 otherwise identical to the default). Two or more run that many items
@@ -356,7 +383,7 @@ can.
 
 ## Editing backend: aider, or lite_editor
 
-    python aider_loop.py --project-dir ~/projects/thing --backend lite
+    forge run --project-dir ~/projects/thing --backend lite
 
 Or `[model] backend = "lite"` in `.aiderloop.toml`. Defaults to `aider`,
 so a project that says nothing keeps exactly the behaviour it had.
@@ -436,7 +463,7 @@ out/
 .aider.tags.cache.v4/
 ```
 
-## Drafting items: spec_compiler.py
+## Drafting items: `forge draft`
 
 Writing an item in the shape the checks above can actually verify -
 one file, a named anchor, an enumerated structure instead of a vague
@@ -445,7 +472,7 @@ the first try and one that burns every retry re-failing the same way.
 That shape is real work, and skipping it is the easy mistake to make
 when you're the one writing the checklist by hand.
 
-    python spec_compiler.py --project-dir ~/projects/blockroad \
+    forge draft --project-dir ~/projects/blockroad \
         --goal 'Add a check that a story title is not longer than 40 characters' \
         --dry-run   # drop this once the draft looks right
 
@@ -495,7 +522,7 @@ lines, hit the num_predict cap) reasoning in plain prose about
 implementation edge cases and never emitted a single checklist item.
 `qwen25-coder-aider` (14B) - the model with no reasoning framing at all -
 just answers, and correctly: a real anchor line, a correct insertion,
-merged on the first attempt. `spec_compiler.py` defaults to it for
+merged on the first attempt. `forge draft` defaults to it for
 exactly that reason. Measured behavior over presumed capability.
 
 ## Requirements
@@ -508,6 +535,19 @@ are what keep a failed item away from your checkout, and there is no
 sensible way to degrade that. The old non-git path ran items directly in
 the tree and left broken changes in place for the next item to build on,
 which is exactly what worktrees replaced.
+
+## Running this project's own tests
+
+    PYTHONPATH=src python3 -m unittest discover -s tests -q
+
+Every case in `tests/` traces to a real bug found by running this tool
+against a real checklist, not a hypothetical - the negation-detection
+tests exist because 12 of 20 items parked incorrectly on a real
+overnight run before `_negates_before()` was added, and the fence-
+stripping tests exist because the first real `lite` run wrote a literal
+` ```python ` into every file. A tool that enforces TDD on every project
+it touches had, until this section, none of its own; these are not
+exhaustive, but every one of them is load-bearing.
 
 ## What it is not
 
