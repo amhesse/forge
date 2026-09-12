@@ -107,6 +107,9 @@ Rules:
 - You may write reasoning or explanation outside the blocks if you find
   it helpful, but the actual file content must be inside a block - text
   outside a block is never read as file content.
+- Do NOT wrap the content in markdown fences. The ===FILE:===/===END===
+  markers already delimit it; a ``` line would be written into the file
+  as a literal line and break it.
 """
 
 
@@ -171,11 +174,37 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
     return "".join(chunks)
 
 
+# A markdown fence wrapping an ENTIRE block's content. Models habitually
+# fence code even when the surrounding protocol already delimits it, so
+# without this the literal line ```python lands as the first line of the
+# file. Measured on the first real run of this harness: every file came
+# out fenced, which a byte-exact item caught immediately and a Python
+# item caught one step later as a SyntaxError.
+_WRAPPING_FENCE_RE = re.compile(r"\A```[a-zA-Z0-9_+-]*[ \t]*\r?\n(?P<inner>.*)\r?\n```[ \t]*\Z", re.DOTALL)
+
+
+def strip_wrapping_fence(content: str) -> str:
+    """Remove a markdown fence that wraps the whole content.
+
+    Only an outermost fence that opens on the very first line and closes
+    on the very last one is removed, so a file that legitimately
+    CONTAINS fenced blocks (a README, this project's own TODO.md) keeps
+    them - the fences inside it don't start at position zero. The one
+    case this gets wrong is a markdown file whose entire content is a
+    single fenced block and nothing else; that's rare enough, and a
+    byte-exact item would catch it, which is more than could be said for
+    leaving every file fenced.
+    """
+    m = _WRAPPING_FENCE_RE.match(content.strip("\n"))
+    return m.group("inner") if m else content
+
+
 def parse_file_blocks(raw: str) -> dict[str, str]:
     """Returns {path: content}. A path is used exactly as written on the
     FILE: line - callers are responsible for restricting to the agreed
     file set (see run_lite_on_item) rather than trusting every block."""
-    return {m.group("path").strip(): m.group("content") for m in _FILE_BLOCK_RE.finditer(raw)}
+    return {m.group("path").strip(): strip_wrapping_fence(m.group("content"))
+            for m in _FILE_BLOCK_RE.finditer(raw)}
 
 
 def run_lite_on_item(project_dir: Path, item_text: str, log_path: Path,

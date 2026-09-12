@@ -1286,7 +1286,18 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
             f"or touch any other file."
         ), log_path, files=[impl_file, test_file], model=model)
         if not fix_success:
-            break
+            # Deliberately not `break`. A failed fix attempt is often the
+            # model regenerating byte-identical content (lite_editor
+            # reports that as failure, correctly - nothing changed), and
+            # breaking here spent the whole remaining retry budget on
+            # one such attempt: measured on archaeologist's first TDD
+            # item, retry 1 of 3 produced identical output and retries 2
+            # and 3 never ran. Retries are bounded by the loop condition
+            # anyway, so letting it try again costs at most the budget
+            # already agreed to.
+            log(f"TDD fix attempt {validation_attempt} produced nothing usable; "
+                f"continuing to the next retry if any remain.", log_path)
+            continue
         if test_file_modified_since_red():
             return finish(STATUS_NEEDS_REVIEW,
                          f"a validation-fix retry modified the test file `{test_file}`")
@@ -1450,8 +1461,12 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
             f"Do not revert or abandon the original change; correct it."
         ), log_path, files=expected, model=model)
         if not fix_success:
-            log(f"Aider itself failed during the validation-fix retry for: {item.text}", log_path)
-            break
+            # See the same spot in run_tdd_phases for why this continues
+            # rather than breaking: a fix attempt that changed nothing
+            # would otherwise consume the entire remaining retry budget.
+            log(f"Fix attempt {validation_attempt} produced nothing usable during the "
+                f"validation-fix retry for: {item.text}", log_path)
+            continue
         # Same check, same reason, on every retry: a fix attempt can produce
         # the corruption just as easily as the first attempt, and retrying
         # into it is exactly the loop this ordering was written to stop.
