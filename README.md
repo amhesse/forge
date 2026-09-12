@@ -445,6 +445,26 @@ costs context twice, once read and once rewritten. Keep items to one
 file, and prefer `lite` on projects whose files are small enough to
 rewrite comfortably.
 
+## Token usage, not cost
+
+Every run ends with a line like:
+
+    Tokens: ~3,600 prompt + ~39 completion across 1 item(s). Local model,
+    no bill - this is where compute went, not what it cost.
+
+These are local models with no per-token bill, so "cost" here means
+compute, not money - which items were expensive, whether a retry paid
+for itself, not a dollar figure to budget against.
+
+The two backends report this differently, and the gap is real, not a
+bug: `lite` reads `prompt_eval_count` / `eval_count` straight off
+Ollama's own response for every call, plus wall-clock generation time.
+`aider` is a subprocess whose API traffic this script never sees, so its
+number comes from parsing the `Tokens: X sent, Y received.` line aider
+prints to its own stdout - real, but self-reported and without a time
+figure. Per-item detail (including which phase of a TDD item spent what)
+is in each item's own JSON record under `~/.cache/aider-loop/<project>/runs/`.
+
 ## .aiderignore is not optional
 
 Aider builds its repo map by walking the working tree, so committed data

@@ -395,8 +395,29 @@ def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path,
     return True, output
 
 
+# One aider stdout line, possibly several per call (aider makes its own
+# internal retries/reflections): "Tokens: 3.6k sent, 5.0k received."
+_AIDER_TOKENS_RE = re.compile(
+    r"Tokens:\s*([\d.]+)(k?)\s*sent,\s*([\d.]+)(k?)\s*received", re.IGNORECASE)
+
+
+def parse_aider_token_line(output: str) -> dict:
+    """Best-effort token usage for the aider backend, summed across every
+    such line in one call's output. This is aider's own self-reported
+    figure from stdout, not a raw API response the way lite_editor's
+    last_usage() is - aider is a subprocess whose API traffic this script
+    never sees, so its own summary is the only source available. No
+    wall-clock figure comes with it, unlike lite_editor's."""
+    prompt = completion = 0.0
+    for sent, sent_k, recv, recv_k in _AIDER_TOKENS_RE.findall(output):
+        prompt += float(sent) * (1000 if sent_k else 1)
+        completion += float(recv) * (1000 if recv_k else 1)
+    return {"prompt_tokens": int(prompt), "completion_tokens": int(completion), "seconds": 0.0}
+
+
 def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
-                       files: list[str] | None = None, model: str | None = None) -> tuple[bool, str]:
+                       files: list[str] | None = None, model: str | None = None
+                       ) -> tuple[bool, str, dict]:
     """Dispatches to whichever editing backend the project asked for.
 
     `[model] backend = "lite"` in .aiderloop.toml (or --backend lite)
@@ -410,13 +431,34 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
     .aider.conf.yml to fall back on the way aider does, so a run without
     --models falls back to `[model] author`, which projects using this
     loop already set for the context check.
+
+    Returns (success, output, usage) - usage is real token counts from
+    Ollama's own response for `lite`, a parse of aider's own printed
+    summary for `aider`. "Cost" here means tokens spent, not money: these
+    are local models with no per-token bill, so the point of tracking
+    this is knowing where compute went (which items were expensive,
+    whether a retry was worth it), not a dollar figure.
     """
     backend = cfg("model", "backend", default="aider")
     if backend == "lite":
-        return lite_editor.run_lite_on_item(
+        success, output = lite_editor.run_lite_on_item(
             project_dir, item_text, log_path, files=files,
             model=model or cfg("model", "author"))
-    return run_aider_on_item(project_dir, item_text, log_path, files=files, model=model)
+        return success, output, lite_editor.last_usage()
+    success, output = run_aider_on_item(project_dir, item_text, log_path, files=files, model=model)
+    return success, output, parse_aider_token_line(output)
+
+
+def _accumulate_usage(record: dict, usage: dict) -> None:
+    """Adds one call's usage into an item's running total. Called after
+    every editor call, including ones that end in failure - a parked
+    item's tokens were still real compute spent, and are worth knowing
+    about (an item that burned three retries' worth of tokens and still
+    parked is a different kind of expensive than one that failed fast)."""
+    totals = record.setdefault("tokens", {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0})
+    totals["prompt_tokens"] += usage.get("prompt_tokens", 0)
+    totals["completion_tokens"] += usage.get("completion_tokens", 0)
+    totals["seconds"] += usage.get("seconds", 0.0)
 
 
 def find_js_html_files(project_dir: Path) -> list[Path]:
@@ -1198,7 +1240,8 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"fail. Do not write a stub or placeholder implementation anywhere to "
         f"make it pass; that defeats the point of writing the test first.\n\n{task_text}"
     )
-    success, _ = run_editor_on_item(worktree_path, red_prompt, log_path, files=[test_file], model=model)
+    success, _, usage = run_editor_on_item(worktree_path, red_prompt, log_path, files=[test_file], model=model)
+    _accumulate_usage(record, usage)
     if not success:
         return finish(STATUS_BLOCKED, "TDD red phase: aider itself failed")
 
@@ -1254,8 +1297,9 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"any file other than `{impl_file}`) currently fails because the feature "
         f"isn't implemented yet. Implement `{impl_file}` so that test passes.\n\n{task_text}"
     )
-    success, _ = run_editor_on_item(worktree_path, green_prompt, log_path,
-                                   files=[impl_file, test_file], model=model)
+    success, _, usage = run_editor_on_item(worktree_path, green_prompt, log_path,
+                                           files=[impl_file, test_file], model=model)
+    _accumulate_usage(record, usage)
     if not success:
         return finish(STATUS_BLOCKED, "TDD green phase: aider itself failed")
 
@@ -1302,13 +1346,14 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         validation_attempt += 1
         log(f"TDD green phase failed validation (retry {validation_attempt}/"
             f"{args.max_validation_retries}): {task_text}", log_path)
-        fix_success, _ = run_editor_on_item(worktree_path, (
+        fix_success, _, fix_usage = run_editor_on_item(worktree_path, (
             f"The implementation in `{impl_file}` does not yet make the test in "
             f"`{test_file}` pass.\n\nOriginal task:\n{task_text}\n\n"
             f"Failure output:\n{validation_msg}\n\n"
             f"Fix `{impl_file}` so the test passes. Do not modify `{test_file}` "
             f"or touch any other file."
         ), log_path, files=[impl_file, test_file], model=model)
+        _accumulate_usage(record, fix_usage)
         if not fix_success:
             # Deliberately not `break`. A failed fix attempt is often the
             # model regenerating byte-identical content (lite_editor
@@ -1419,7 +1464,8 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         attempt += 1
         if attempt > 1:
             log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
-        success, _ = run_editor_on_item(worktree_path, item.text, log_path, files=expected, model=model)
+        success, _, usage = run_editor_on_item(worktree_path, item.text, log_path, files=expected, model=model)
+        _accumulate_usage(record, usage)
     record["aider_attempts"] = attempt
 
     if not success:
@@ -1477,13 +1523,14 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         validation_attempt += 1
         log(f"Validation failed (retry {validation_attempt}/{args.max_validation_retries}), "
             f"asking aider to fix it: {item.text}", log_path)
-        fix_success, _ = run_editor_on_item(worktree_path, (
+        fix_success, _, fix_usage = run_editor_on_item(worktree_path, (
             f"The previous change for this task did not pass validation.\n\n"
             f"Original task:\n{item.text}\n\n"
             f"Validation failure output:\n{validation_msg}\n\n"
             f"Fix the failure above while still completing the original task. "
             f"Do not revert or abandon the original change; correct it."
         ), log_path, files=expected, model=model)
+        _accumulate_usage(record, fix_usage)
         if not fix_success:
             # See the same spot in run_tdd_phases for why this continues
             # rather than breaking: a fix attempt that changed nothing
@@ -1572,8 +1619,33 @@ def update_item_status(todo_path: Path, item: "TodoItem", status: str) -> None:
     todo_path.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
 
 
-def log_run_summary(items_processed: int, parked: list[dict], todo_path: Path, log_path: Path) -> None:
+def log_run_summary(items_processed: int, parked: list[dict], todo_path: Path, log_path: Path,
+                    runs_dir: Path | None = None) -> None:
     log(f"Run complete. {items_processed} item(s) processed. See {todo_path} for status.", log_path)
+    if runs_dir and runs_dir.is_dir():
+        # Read back every item's own record rather than threading a
+        # running total through both dispatch paths - `parked` only ever
+        # holds the failures, and a token total that silently excluded
+        # every item that actually merged would be worse than none.
+        prompt = completion = 0
+        seconds = 0.0
+        n = 0
+        for f in runs_dir.glob("item-*.json"):
+            try:
+                rec = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            tokens = rec.get("tokens")
+            if not tokens:
+                continue
+            n += 1
+            prompt += tokens.get("prompt_tokens", 0)
+            completion += tokens.get("completion_tokens", 0)
+            seconds += tokens.get("seconds", 0.0)
+        if n:
+            log(f"Tokens: ~{prompt:,} prompt + ~{completion:,} completion across {n} item(s)"
+                + (f" ({seconds:.0f}s of measured generation time)" if seconds else "")
+                + ". Local model, no bill - this is where compute went, not what it cost.", log_path)
     if parked:
         # The point of parking rather than reverting: the work still
         # exists. Name the branches here so the run ends with something
@@ -1789,7 +1861,7 @@ def main():
     models = resolve_models(args)
     if len(models) > 1:
         items_processed, parked = run_parallel(project_dir, todo_path, args, log_path, models, runs_dir)
-        log_run_summary(items_processed, parked, todo_path, log_path)
+        log_run_summary(items_processed, parked, todo_path, log_path, runs_dir)
         return
 
     # One name (or none) runs the original sequential path, just with
@@ -1838,7 +1910,7 @@ def main():
         time.sleep(args.sleep_between)
         continue
 
-    log_run_summary(items_processed, parked, todo_path, log_path)
+    log_run_summary(items_processed, parked, todo_path, log_path, runs_dir)
 
 
 if __name__ == "__main__":

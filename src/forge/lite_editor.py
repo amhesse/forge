@@ -66,9 +66,26 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Ollama's own token counts for the most recent call THIS THREAD made -
+# not a global, because --models runs one worker per thread and a shared
+# mutable dict would race between them. Read via last_usage() right after
+# a call_ollama() completes in the same thread; there's no queue or
+# history, just "what did the call I just made cost".
+_usage_local = threading.local()
+
+
+def last_usage() -> dict:
+    """{'prompt_tokens', 'completion_tokens', 'seconds'} for the most
+    recent call_ollama() on this thread, or zeros if none yet / the call
+    failed before Ollama returned its final chunk. Real usage from
+    Ollama's own response, not an estimate - `prompt_eval_count` and
+    `eval_count` on the final streamed chunk."""
+    return getattr(_usage_local, "usage", {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0})
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 DEFAULT_NUM_CTX = 32768
@@ -154,6 +171,7 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
     }).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     chunks = []
+    _usage_local.usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             for line in resp:
@@ -166,6 +184,15 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
                 if obj.get("done"):
                     if obj.get("done_reason") == "length":
                         _log(f"[lite_editor] hit num_predict={num_predict} - output may be truncated", log_path)
+                    # Real counts from Ollama's own final chunk, not an
+                    # estimate - present on every "done" response this
+                    # server version sends, absent (and left at 0) only
+                    # if the connection died before one arrived.
+                    _usage_local.usage = {
+                        "prompt_tokens": obj.get("prompt_eval_count", 0),
+                        "completion_tokens": obj.get("eval_count", 0),
+                        "seconds": obj.get("total_duration", 0) / 1e9,
+                    }
                     break
     except urllib.error.URLError as e:
         _log(f"[lite_editor] could not reach ollama at {url}: {e}", log_path)
