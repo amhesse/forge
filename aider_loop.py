@@ -191,6 +191,15 @@ def parse_todo(todo_path: Path) -> tuple[list[str], list[TodoItem]]:
     including) the next checkbox line, a checkpoint comment, or end of
     file, with trailing blank lines trimmed."""
     raw_lines = todo_path.read_text(encoding="utf-8").splitlines()
+    return raw_lines, parse_todo_lines(raw_lines)
+
+
+def parse_todo_lines(raw_lines: list[str]) -> list[TodoItem]:
+    """The line-splitting half of parse_todo(), usable on text that hasn't
+    (or shouldn't) touch disk - spec_compiler.py runs this on a model's
+    draft output before any of it is written anywhere, so a malformed
+    draft is caught by the exact same regex that will later govern how
+    this same text is read back as real checklist items."""
     items = []
     n = len(raw_lines)
     i = 0
@@ -209,7 +218,7 @@ def parse_todo(todo_path: Path) -> tuple[list[str], list[TodoItem]]:
             text_lines.pop()
         items.append(TodoItem(start, m.group("indent"), "\n".join(text_lines), m.group("mark")))
         i = j
-    return raw_lines, items
+    return items
 
 
 def write_todo(todo_path: Path, raw_lines: list[str], items: list[TodoItem]) -> None:

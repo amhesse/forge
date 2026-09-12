@@ -9,6 +9,11 @@ local model will confidently produce work that is wrong in ways that still
 compile, and the checks below exist because each one caught a real failure
 that the previous checks missed.
 
+A separate tool, `spec_compiler.py`, drafts the checklist items themselves
+from a vague goal - see its own section below. It exists because writing
+items in the shape below is most of what makes them reliable, and that
+shape is tedious enough by hand that skipping it is the easy mistake.
+
 Every item runs in its own `git worktree`, branched from the project's
 current HEAD. Only an item that passes every check is merged back. A
 failure is never applied at all, so there is nothing to undo and no reason
@@ -184,6 +189,68 @@ out/
 .aider.chat.history.md
 .aider.tags.cache.v4/
 ```
+
+## Drafting items: spec_compiler.py
+
+Writing an item in the shape the checks above can actually verify -
+one file, a named anchor, an enumerated structure instead of a vague
+quantity - is what makes the difference between an item that passes on
+the first try and one that burns every retry re-failing the same way.
+That shape is real work, and skipping it is the easy mistake to make
+when you're the one writing the checklist by hand.
+
+    python spec_compiler.py --project-dir ~/projects/blockroad \
+        --goal 'Add a check that a story title is not longer than 40 characters' \
+        --dry-run   # drop this once the draft looks right
+
+It calls a local model to draft items, validates their *shape* (a real
+backtick path, a real "exactly:" fence, an anchor line that actually
+exists in the file right now) against the same parsers aider_loop uses
+to read them back, and appends them to the checklist - it never touches
+project files and never runs aider itself. A human reads the draft
+before the loop ever sees it.
+
+Every rule it enforces is a real failure from a real run on this
+project, baked into its system prompt rather than left as advice:
+
+- **Don't split a change across a consistency constraint.** Asked to
+  create a story and register it in the stories index as two separate
+  items, the model wrote a structurally perfect story and it was
+  rejected anyway - solely for not being in the index yet, because the
+  project's checker requires each file to agree with the other. Neither
+  half is valid alone, so both edits belong in one item.
+- **Name the exact anchor for an edit into existing code**, and say
+  outright whether it's a pure insertion. "Add a check for X" got pasted
+  over an unrelated check and deleted it, twice, before the anchor was
+  named - after which the same task merged in one attempt, 18 seconds,
+  zero retries.
+- **Enumerate structure instead of a vague quantity.** "At least 7
+  scenes, 2 endings, 2 locks" got satisfied one constraint at a time
+  across three retries while breaking earlier ones, and never converged.
+  The same story, with every scene and its required parts spelled out,
+  passed on the first try.
+- **Only quote a line as "existing" if you were actually shown the file
+  it's in.** A first version of this tool let the model draft an item
+  that named a plausible-looking anchor line for `src/check.js` without
+  the model ever having seen that file's real content - it invented one
+  that appears nowhere in the actual source. gather_context() now
+  inlines the full content of any file the goal names, and validate_item()
+  independently checks a claimed anchor against the file as it exists on
+  disk, so a hallucinated one is flagged before it's ever written down,
+  not discovered later as a corrupted commit.
+
+### Model choice matters here too
+
+The obvious pick for a *drafting* role is the model meant to reason, not
+just write code - this project's `qwen3.8-aider` (27B). It failed the
+same way it fails at driving aider directly: given nothing but "draft
+checklist items for this goal," it spent its entire output budget (405
+lines, hit the num_predict cap) reasoning in plain prose about
+implementation edge cases and never emitted a single checklist item.
+`qwen25-coder-aider` (14B) - the model with no reasoning framing at all -
+just answers, and correctly: a real anchor line, a correct insertion,
+merged on the first attempt. `spec_compiler.py` defaults to it for
+exactly that reason. Measured behavior over presumed capability.
 
 ## Requirements
 
