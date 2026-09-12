@@ -21,11 +21,12 @@ commands:
            (was: spec_compiler.py)
   review   Open a local page for reviewing parked branches
            (was: review_server.py)
+  eval     Run forge's own regression suite against stub editors
 
 Run `forge <command> --help` for that command's own options.
 """
 
-COMMANDS = {"run": "aider_loop", "draft": "spec_compiler", "review": "review_server"}
+COMMANDS = {"run": "aider_loop", "draft": "spec_compiler", "review": "review_server", "eval": "eval"}
 
 
 def main(argv: list[str] | None = None) -> int:
