@@ -55,6 +55,7 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
+import lite_editor
 import worktree as wt
 
 CHECKBOX_RE = re.compile(r"^(?P<indent>\s*)-\s\[(?P<mark>[ xX!?])\]\s(?P<text>.+)$")
@@ -392,6 +393,30 @@ def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path,
         return False, output
 
     return True, output
+
+
+def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
+                       files: list[str] | None = None, model: str | None = None) -> tuple[bool, str]:
+    """Dispatches to whichever editing backend the project asked for.
+
+    `[model] backend = "lite"` in .aiderloop.toml (or --backend lite)
+    swaps aider for lite_editor, which is built for exactly this loop's
+    usage and structurally can't hit three failure classes aider produced
+    on this project's real runs - see lite_editor's module docstring.
+    Defaults to "aider", so a project that says nothing keeps the
+    behaviour it already had.
+
+    lite_editor always needs an explicit model: it has no
+    .aider.conf.yml to fall back on the way aider does, so a run without
+    --models falls back to `[model] author`, which projects using this
+    loop already set for the context check.
+    """
+    backend = cfg("model", "backend", default="aider")
+    if backend == "lite":
+        return lite_editor.run_lite_on_item(
+            project_dir, item_text, log_path, files=files,
+            model=model or cfg("model", "author"))
+    return run_aider_on_item(project_dir, item_text, log_path, files=files, model=model)
 
 
 def find_js_html_files(project_dir: Path) -> list[Path]:
@@ -1149,7 +1174,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"fail. Do not write a stub or placeholder implementation anywhere to "
         f"make it pass; that defeats the point of writing the test first.\n\n{task_text}"
     )
-    success, _ = run_aider_on_item(worktree_path, red_prompt, log_path, files=[test_file], model=model)
+    success, _ = run_editor_on_item(worktree_path, red_prompt, log_path, files=[test_file], model=model)
     if not success:
         return finish(STATUS_BLOCKED, "TDD red phase: aider itself failed")
 
@@ -1205,7 +1230,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"any file other than `{impl_file}`) currently fails because the feature "
         f"isn't implemented yet. Implement `{impl_file}` so that test passes.\n\n{task_text}"
     )
-    success, _ = run_aider_on_item(worktree_path, green_prompt, log_path,
+    success, _ = run_editor_on_item(worktree_path, green_prompt, log_path,
                                    files=[impl_file, test_file], model=model)
     if not success:
         return finish(STATUS_BLOCKED, "TDD green phase: aider itself failed")
@@ -1253,7 +1278,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         validation_attempt += 1
         log(f"TDD green phase failed validation (retry {validation_attempt}/"
             f"{args.max_validation_retries}): {task_text}", log_path)
-        fix_success, _ = run_aider_on_item(worktree_path, (
+        fix_success, _ = run_editor_on_item(worktree_path, (
             f"The implementation in `{impl_file}` does not yet make the test in "
             f"`{test_file}` pass.\n\nOriginal task:\n{task_text}\n\n"
             f"Failure output:\n{validation_msg}\n\n"
@@ -1359,7 +1384,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         attempt += 1
         if attempt > 1:
             log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
-        success, _ = run_aider_on_item(worktree_path, item.text, log_path, files=expected, model=model)
+        success, _ = run_editor_on_item(worktree_path, item.text, log_path, files=expected, model=model)
     record["aider_attempts"] = attempt
 
     if not success:
@@ -1417,7 +1442,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         validation_attempt += 1
         log(f"Validation failed (retry {validation_attempt}/{args.max_validation_retries}), "
             f"asking aider to fix it: {item.text}", log_path)
-        fix_success, _ = run_aider_on_item(worktree_path, (
+        fix_success, _ = run_editor_on_item(worktree_path, (
             f"The previous change for this task did not pass validation.\n\n"
             f"Original task:\n{item.text}\n\n"
             f"Validation failure output:\n{validation_msg}\n\n"
@@ -1650,6 +1675,14 @@ def main():
                          help="Keep the per-item branch even for items that passed and merged "
                               "(a failed item's branch is always kept - it's the only copy of "
                               "what the model produced).")
+    parser.add_argument("--backend", default=None, choices=["aider", "lite"],
+                         help="Which editing backend to use, overriding [model] backend in "
+                              ".aiderloop.toml. 'aider' (the default) shells out to aider; "
+                              "'lite' uses lite_editor.py, built for exactly this loop's usage - "
+                              "it decides the file set in Python before calling the model and asks "
+                              "for whole-file content rather than a diff, so SEARCH/REPLACE "
+                              "mismatches, file-selection reflection loops and invented filenames "
+                              "are all structurally impossible. See its module docstring.")
     parser.add_argument("--models", default=None, type=str,
                          help="Comma-separated ollama model name(s), overriding .aider.conf.yml's "
                               "model: key. One name runs sequentially as before, just with that "
@@ -1661,6 +1694,12 @@ def main():
     project_dir = Path(args.project_dir).expanduser().resolve()
     global CONFIG
     CONFIG = load_config(project_dir)
+    if args.backend:
+        # CLI wins over the project's own [model] backend, the same way
+        # --models wins over [worker] models. Written into CONFIG rather
+        # than threaded through every call site, since run_editor_on_item
+        # reads it from there anyway.
+        CONFIG.setdefault("model", {})["backend"] = args.backend
     todo_path = project_dir / args.todo_file
     log_path = project_dir / "aider_loop.log"
 

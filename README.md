@@ -354,6 +354,70 @@ Set `edit_format = "whole"` under `[model]` to go back for a model that
 handles SEARCH/REPLACE badly. Either way, keep items to one file where you
 can.
 
+## Editing backend: aider, or lite_editor
+
+    python aider_loop.py --project-dir ~/projects/thing --backend lite
+
+Or `[model] backend = "lite"` in `.aiderloop.toml`. Defaults to `aider`,
+so a project that says nothing keeps exactly the behaviour it had.
+
+`lite_editor.py` does the same job as calling aider — task and files in,
+committed edits out — but is built for this loop's one usage pattern
+(headless, one message, no chat history, no multi-turn negotiation)
+rather than aider's general-purpose machinery. It exists because of three
+failures aider produced on this project's own real runs:
+
+1. **SEARCH/REPLACE brittleness.** `diff` format needs the model's block
+   to match the file character-for-character. Measured on a real
+   `voltagedrop` item: the model emitted spaces, the file used tabs, the
+   edit was silently discarded and three reflections were burned finding
+   out.
+2. **The "which files should I add?" reflection loop.** A model that
+   reasons in prose answers that question instead of editing — what
+   disqualified qwen3.8:27b twice (12k tokens sent, 1.6k back, zero
+   edits).
+3. **Invented filenames.** aider infers a target path from surrounding
+   text when a block doesn't parse; a model's own reasoning has twice
+   become an actual file (`File Listing: stories/index.json`).
+
+All three come from asking the model to describe *where* to write and to
+produce a *diff*. So `lite_editor` asks for neither. Every file it will
+touch is decided in Python before the model is called (from the same
+`expected_files()` parsing that already feeds `--file`), and the model is
+asked for each file's **entire new content** — the one thing this project
+has repeatedly measured local models being good at. Python does the
+diffing, because Python does it correctly.
+
+The output contract is a sentinel block, parsed by fixed regex rather
+than inferred from context:
+
+```
+===FILE: path/relative/to/project===
+<the file's complete new content>
+===END===
+```
+
+Prose outside the blocks is ignored. **A block naming a file outside the
+agreed set is never written** — not sanitized, not repaired, ignored. An
+invented path structurally cannot reach disk, which is the same bug class
+`restore_unnamed_files()` exists to clean up after; here there is no
+"after".
+
+Verified: eight parser cases (multi-file, prose around blocks, markdown
+fences *inside* file content, unterminated block, whitespace in markers)
+and six end-to-end cases (a block literally named `File Listing:
+invented.py` ignored while the real file was still written; new file with
+parent directories created; a no-op rewrite rejected without an empty
+commit; unparseable output failing without touching disk; commit actually
+made on success; refusing to run with no named files or no model). Then
+against a real model on the exact tab-indented shape that broke aider's
+diff format — merged in 26s with tab indentation preserved byte-for-byte.
+
+The tradeoff is the same one `whole` format has always had: the file
+costs context twice, once read and once rewritten. Keep items to one
+file, and prefer `lite` on projects whose files are small enough to
+rewrite comfortably.
+
 ## .aiderignore is not optional
 
 Aider builds its repo map by walking the working tree, so committed data
