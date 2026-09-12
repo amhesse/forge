@@ -1036,6 +1036,24 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         log(f"Aider failed after {attempt} attempt(s), parking blocked: {item.text}", log_path)
         return finish(STATUS_BLOCKED, f"aider itself failed after {attempt} attempt(s)")
 
+    # Garbage filenames are looked for BEFORE anything is restored, because
+    # restore_unnamed_files() would otherwise destroy the evidence: a file
+    # named after the model's own output ("File Listing: stories/index.json")
+    # is by definition not a file the task named, so it gets reverted as an
+    # unnamed extra and `touched` is clean again by the time the check below
+    # runs. Measured on blockroad: an item created `File Listing:
+    # stories/index.json` and `File: stories/the-night-build.story`, and
+    # parked for "validation failed" instead - burning all three validation
+    # retries re-triggering the same corruption, because the failure it was
+    # asked to fix was never the real one.
+    suspicious = suspicious_new_paths(changed_files(worktree_path, base))
+    if suspicious:
+        log(f"Garbage-looking filename(s) created: {suspicious} - aider likely turned a "
+            f"malformed file block into a new file named after its own output. "
+            f"Parking: {item.text}", log_path)
+        record["touched_files"] = suspicious
+        return finish(STATUS_BLOCKED, f"garbage filename(s) created: {suspicious}")
+
     restore_unnamed_files(worktree_path, base, expected, log_path)
     if wt.restore_todo(worktree_path, base, args.todo_file):
         log(f"Item edited {args.todo_file}; restored it (the checklist is the "
@@ -1061,11 +1079,6 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         log(f"Prompt-leakage marker found in {corrupted}. Parking: {item.text}", log_path)
         return finish(STATUS_BLOCKED, f"prompt text was written into {corrupted} as content")
 
-    suspicious = suspicious_new_paths(touched)
-    if suspicious:
-        log(f"Garbage-looking filename(s) created: {suspicious}. Parking: {item.text}", log_path)
-        return finish(STATUS_BLOCKED, f"garbage filename(s) created: {suspicious}")
-
     scope = [worktree_path / f for f in touched]
     valid, validation_msg = validate_syntax(worktree_path, log_path, scope)
 
@@ -1084,6 +1097,16 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         if not fix_success:
             log(f"Aider itself failed during the validation-fix retry for: {item.text}", log_path)
             break
+        # Same check, same reason, on every retry: a fix attempt can produce
+        # the corruption just as easily as the first attempt, and retrying
+        # into it is exactly the loop this ordering was written to stop.
+        suspicious = suspicious_new_paths(changed_files(worktree_path, base))
+        if suspicious:
+            log(f"Garbage-looking filename(s) created during the fix retry: {suspicious}. "
+                f"Parking rather than retrying into it again: {item.text}", log_path)
+            record["touched_files"] = suspicious
+            record["validation_retries"] = validation_attempt
+            return finish(STATUS_BLOCKED, f"garbage filename(s) created on retry: {suspicious}")
         restore_unnamed_files(worktree_path, base, expected, log_path)
         wt.restore_todo(worktree_path, base, args.todo_file)
         touched = changed_files(worktree_path, base)
