@@ -28,8 +28,18 @@ class TestParseFileBlocks(unittest.TestCase):
     def test_no_block_at_all_returns_empty(self):
         self.assertEqual(le.parse_file_blocks("I think you should add a function."), {})
 
-    def test_unterminated_block_returns_empty(self):
-        self.assertEqual(le.parse_file_blocks("===FILE: a.py===\nvalue = 1"), {})
+    def test_missing_end_marker_still_captures_the_content(self):
+        # Was "returns empty" until a real long-form generation proved
+        # that assumption wrong - see TestWrappingFenceStripping's
+        # sibling tests below for the full story. A block with no
+        # closing marker is exactly as likely to be genuinely complete
+        # (the model just forgot the tag) as it is to be truncated, and
+        # this project has no way to tell those apart from the text
+        # alone - so it's read to the end of the response, which is
+        # unambiguously correct when this IS the only/last block, and
+        # produces the same content the model would have written between
+        # a present END and nothing after it anyway.
+        self.assertEqual(le.parse_file_blocks("===FILE: a.py===\nvalue = 1"), {"a.py": "value = 1"})
 
     def test_whitespace_in_markers_is_tolerated(self):
         raw = "===FILE:  a.py  ===\nq\n=== END ==="
@@ -56,6 +66,22 @@ class TestWrappingFenceStripping(unittest.TestCase):
     def test_multiline_fenced_function_is_stripped(self):
         raw = "===FILE: a.py===\n```python\ndef f():\n    return 1\n```\n===END==="
         self.assertEqual(le.parse_file_blocks(raw), {"a.py": "def f():\n    return 1"})
+
+    def test_missing_end_marker_reads_to_end_of_string(self):
+        # Real, not hypothetical: a long-form generation (a story, not a
+        # config file) finished its actual content and simply never
+        # emitted ===END=== - no natural "closing brace" cue the way code
+        # has one. num_predict was nowhere near hit (no truncation
+        # warning in the real run this regresses). Without this, a
+        # complete, correct file was discarded as unparseable.
+        raw = "===FILE: story.md===\n# Title\n\nOnce upon a time.\nThe end."
+        self.assertEqual(le.parse_file_blocks(raw),
+                        {"story.md": "# Title\n\nOnce upon a time.\nThe end."})
+
+    def test_missing_end_marker_stops_at_the_next_file_block(self):
+        raw = "===FILE: a.md===\nfirst content\n===FILE: b.md===\nsecond content\n===END==="
+        self.assertEqual(le.parse_file_blocks(raw),
+                        {"a.md": "first content", "b.md": "second content"})
 
     def test_markdown_file_keeps_its_own_internal_fences(self):
         # The one case this can't distinguish perfectly (see

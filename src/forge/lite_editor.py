@@ -98,8 +98,21 @@ DEFAULT_NUM_PREDICT = 8000  # a rewritten file plus reasoning; bounded for
                              # block. Capped, not silently allowed to run.
 DEFAULT_TIMEOUT = 600
 
+# A block's content ends at whichever comes first: a real ===END===, the
+# start of the NEXT ===FILE:=== block (matched via lookahead, so it stays
+# unconsumed for finditer's own next match), or the end of the response.
+# That last branch matters for real, not hypothetically: a long-form
+# generation (a short story, not a config file) reliably finished the
+# actual content and then simply never emitted ===END=== at all -
+# measured directly, num_predict was nowhere near hit (no truncation
+# warning), the model just had no natural "I'm done, close the tag" cue
+# the way code's own closing brace gives it. Without this fallback, a
+# complete, correct story was discarded as unparseable and retried into
+# producing the exact same gap again.
 _FILE_BLOCK_RE = re.compile(
-    r"===\s*FILE:\s*(?P<path>[^\n=]+?)\s*===\r?\n(?P<content>.*?)(?:\r?\n)?===\s*END\s*===",
+    r"===\s*FILE:\s*(?P<path>[^\n=]+?)\s*===\r?\n"
+    r"(?P<content>.*?)"
+    r"(?:\r?\n===\s*END\s*===|(?=\r?\n===\s*FILE:)|\Z)",
     re.DOTALL,
 )
 
