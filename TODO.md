@@ -10,7 +10,7 @@ The model actually wrote the correct COMMANDS dict and the correct USAGE
 line - the item itself was the thing that was wrong. Fixed the only way
 that's genuinely safe on a file this size: replace the whole thing.
 
-- [ ] Replace the entire contents of `src/forge/cli.py` with exactly:
+- [x] Replace the entire contents of `src/forge/cli.py` with exactly:
 ```python
 """The `forge` command: one entry point, four subcommands.
 
