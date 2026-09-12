@@ -41,6 +41,13 @@ own branch to read in the morning.
 6. **Syntax**, over the changed files only, plus whatever `[validate]
    commands` the project declares.
 
+A `TDD:` item (see *Writing items*) runs a different sequence: write the
+test, confirm it fails (and that the failure is real, not a crash — a
+plain syntax check, before the project's `[validate] commands` run at
+all), then implement, then checks 4–6 above against the combined result,
+plus one more specific to this mode — the test file must be byte-identical
+to what the red phase produced, not just absent from the touched set.
+
 Anything worse than "fine" is *parked*: the item's branch is left behind,
 the project checkout never sees it, and the next item starts from the same
 base. Nothing is reverted, because nothing was ever applied.
@@ -128,6 +135,36 @@ An item's text runs from its checkbox line to the next checkbox, so fenced
 blocks and multi-line prose are included. An HTML comment (`<!-- ... -->`)
 also ends an item — useful for notes between items, but don't put one
 *inside* one.
+
+**Start an item with `TDD:`** to run it red-then-green instead of in one
+pass:
+
+```markdown
+- [ ] TDD: implement `src/thing.py` so `test/test_thing.py` passes: given a
+  negative amount, `format_price` raises `ValueError`.
+```
+
+Name exactly two files, one of them test-shaped (a `test/`/`tests/` path
+component, or `.test.`/`_test.`/`test_` in the filename — covering both
+`test/check.test.js` and `test_thing.py`/`thing_test.py` conventions).
+Aider is called twice: first asked to write *only* the test — told
+explicitly that it's expected to fail and not to touch the implementation
+or write a stub to fake a pass — then, once that failure is confirmed to be
+a real one (see below) and not a crash, asked to implement the other file
+without touching the test again.
+
+This is "the tests are the check" (below) applied to the test itself: a
+test a human never looked at is exactly the kind of thing that can pass
+by accident — checking the wrong thing, or nothing at all — and the usual
+checks here can't tell that from a genuine one. Confirming it fails first
+is the same thing a human reviewer does by habit before trusting a new
+test to grade anything. Failure modes this catches, not just the happy
+path: the test passing immediately (parked, needs-review — it may not
+test the described behavior, or already passes), and the implementation
+step rewriting the test to make it pass instead of writing real code
+(parked, needs-review, byte-compared against the test as the red phase
+left it — not just "was it in the touched set," since a same-content
+rewrite would still show as touched).
 
 ## Configuration
 

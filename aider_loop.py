@@ -596,6 +596,32 @@ def validate_syntax(project_dir: Path, log_path: Path,
     docstring for why that scoping is load-bearing rather than an
     optimisation.
     """
+    results = check_syntax_only(project_dir, log_path, scope)
+    results.append(run_configured_commands(project_dir, log_path))
+
+    ok = all(r[0] for r in results)
+    combined = "\n\n".join(r[1] for r in results if r[1] and r[1] != "ok")
+    return ok, combined or "ok"
+
+
+def check_syntax_only(project_dir: Path, log_path: Path,
+                      scope: list[Path] | None = None) -> list[tuple[bool, str]]:
+    """The syntax-checker half of validate_syntax(), without the project's
+    own `[validate] commands`.
+
+    Split out because those two things answer different questions: "is
+    this file well-formed" and "does the project's test suite pass" are
+    not the same check, and TDD's red phase needs only the first - a
+    crash in the new test isn't "a failing test" and shouldn't be treated
+    as one, but the project's test command failing IS exactly what red
+    phase expects and must not be mistaken for a syntax problem either.
+    Calling validate_syntax() itself for this would run the project's
+    commands a phase early and misreport the result: measured directly,
+    the red-phase test importing a not-yet-written module made the
+    project's own `commands` gate fail (correctly - that's the point of
+    red phase), and validate_syntax() folded that into "syntax error",
+    which it wasn't.
+    """
     checks = cfg("validate", "checks", default=None)
     if checks is None:
         checks = ["python", "js-html"]
@@ -605,12 +631,7 @@ def validate_syntax(project_dir: Path, log_path: Path,
         results.append(validate_python(project_dir, log_path, scope))
     if "js-html" in checks or "npm-build" in checks:
         results.append(validate_js_html(project_dir, log_path, scope))
-
-    results.append(run_configured_commands(project_dir, log_path))
-
-    ok = all(r[0] for r in results)
-    combined = "\n\n".join(r[1] for r in results if r[1] and r[1] != "ok")
-    return ok, combined or "ok"
+    return results
 
 
 def package_json_or_js_html_present(project_dir: Path) -> bool:
@@ -994,6 +1015,205 @@ def record_run(runs_dir: Path, index: int, record: dict) -> Path:
     return path
 
 
+# A literal "TDD:" prefix opts an item into red-green-refactor instead of
+# the normal single-pass flow. Not inferred from an item naming a test
+# file alongside an implementation file - several real items already do
+# that (see blockroad's choice-length check, done in one pass) without
+# wanting strict phase separation, and that style is not wrong, just a
+# different and weaker guarantee than this one buys. Opt-in keeps both
+# available without one silently overriding the other.
+TDD_PREFIX_RE = re.compile(r"^\s*TDD:\s*", re.IGNORECASE)
+
+
+def is_tdd_item(item_text: str) -> bool:
+    return bool(TDD_PREFIX_RE.match(item_text))
+
+
+def classify_tdd_files(files: list[str]) -> tuple[str, str] | None:
+    """Given the files a TDD item named, decides which is the test and
+    which is the implementation. Requires exactly two files, exactly one
+    of which looks test-shaped: a `test/` or `tests/` path component, or
+    `.test.` / `_test.` / a `test_` filename prefix - covering both this
+    project's own test/check.test.js convention and pytest's test_foo.py
+    / foo_test.py. Returns None rather than guessing when the naming
+    doesn't clearly pick a side, falling the item back to needs-review -
+    a silent wrong guess here would run the wrong file through the wrong
+    phase (implementing into what should have stayed a fixed target, or
+    "testing" the test)."""
+    if len(files) != 2:
+        return None
+    def looks_like_test(path: str) -> bool:
+        parts = path.split("/")
+        name = parts[-1]
+        return (any(p in ("test", "tests") for p in parts[:-1])
+                or ".test." in name or "_test." in name or name.startswith("test_"))
+    test_like = [f for f in files if looks_like_test(f)]
+    other = [f for f in files if not looks_like_test(f)]
+    return (test_like[0], other[0]) if len(test_like) == 1 and len(other) == 1 else None
+
+
+def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
+                   test_file: str, impl_file: str, base: str, args, log_path: Path,
+                   record: dict, finish) -> tuple[str, dict]:
+    """Red, then green: aider writes ONLY the test and that test is
+    confirmed to fail for a real reason, then a separate aider call
+    implements the feature without being allowed to touch the test again.
+
+    This is the version of "the tests are the check" (see README) that
+    doesn't depend on the test having been written correctly by a human
+    ahead of time: the test's own honesty is verified before it's ever
+    trusted to grade anything, the same way a human reviewer would want
+    to see a new test fail before believing it tests the right thing.
+    """
+    record["tdd"] = {"test_file": test_file, "impl_file": impl_file}
+
+    # ---------------------------------------------------------------- RED
+    red_prompt = (
+        f"Write ONLY the test described below, in `{test_file}`. Do not create, "
+        f"modify, or touch `{impl_file}` or any other file - the feature it "
+        f"describes does not exist yet, so the test you write is EXPECTED to "
+        f"fail. Do not write a stub or placeholder implementation anywhere to "
+        f"make it pass; that defeats the point of writing the test first.\n\n{task_text}"
+    )
+    success, _ = run_aider_on_item(worktree_path, red_prompt, log_path, files=[test_file])
+    if not success:
+        return finish(STATUS_BLOCKED, "TDD red phase: aider itself failed")
+
+    suspicious = suspicious_new_paths(changed_files(worktree_path, base))
+    if suspicious:
+        log(f"Garbage-looking filename(s) created in the red phase: {suspicious}. "
+            f"Parking: {task_text}", log_path)
+        return finish(STATUS_BLOCKED, f"TDD red phase created garbage filename(s): {suspicious}")
+
+    restore_unnamed_files(worktree_path, base, [test_file], log_path)
+    wt.restore_todo(worktree_path, base, args.todo_file)
+    red_touched = changed_files(worktree_path, base)
+    record["red_touched_files"] = red_touched
+
+    if path_matches_any(impl_file, red_touched):
+        log(f"Red phase touched `{impl_file}` despite being told not to. "
+            f"Parking: {task_text}", log_path)
+        return finish(STATUS_NEEDS_REVIEW, f"red phase touched the implementation file `{impl_file}`")
+    if not path_matches_any(test_file, red_touched):
+        log(f"Red phase never wrote `{test_file}`. Parking: {task_text}", log_path)
+        return finish(STATUS_NEEDS_REVIEW, f"red phase never touched the test file `{test_file}`")
+
+    corrupted = detect_prompt_leakage(worktree_path, red_touched)
+    if corrupted:
+        return finish(STATUS_BLOCKED, f"prompt text was written into {corrupted} during the red phase")
+
+    # A crash isn't "a failing test" - it's no signal at all, and the
+    # green phase below would have nothing real to fix. Syntax only, not
+    # validate_syntax() - that also runs the project's own [validate]
+    # commands, which is exactly the gate red phase is deliberately
+    # failing right now; see check_syntax_only()'s docstring.
+    syn_results = check_syntax_only(worktree_path, log_path, scope=[worktree_path / test_file])
+    syn_ok = all(r[0] for r in syn_results)
+    if not syn_ok:
+        syn_msg = "\n\n".join(r[1] for r in syn_results if r[1] and r[1] != "ok")
+        log(f"Red-phase test has a syntax error: {syn_msg}. Parking: {task_text}", log_path)
+        return finish(STATUS_BLOCKED, "red phase test file has a syntax error")
+
+    gate_ok, gate_msg = run_configured_commands(worktree_path, log_path)
+    record["red_phase_gate_output"] = gate_msg[-2000:]
+    if gate_ok:
+        log(f"Red-phase test passed immediately, before any implementation was "
+            f"written. Parking: {task_text}", log_path)
+        return finish(STATUS_NEEDS_REVIEW,
+                     "the new test passed before any implementation was written - it may "
+                     "not test the described behavior, or the behavior already exists")
+    log(f"Red phase confirmed: `{test_file}` fails as expected.", log_path)
+    red_commit = git_head(worktree_path)
+
+    # --------------------------------------------------------------- GREEN
+    green_prompt = (
+        f"The test in `{test_file}` (already written - do not modify it, or touch "
+        f"any file other than `{impl_file}`) currently fails because the feature "
+        f"isn't implemented yet. Implement `{impl_file}` so that test passes.\n\n{task_text}"
+    )
+    success, _ = run_aider_on_item(worktree_path, green_prompt, log_path,
+                                   files=[impl_file, test_file])
+    if not success:
+        return finish(STATUS_BLOCKED, "TDD green phase: aider itself failed")
+
+    def test_file_modified_since_red() -> bool:
+        # Byte-identical to what the red phase produced, not just "not
+        # reported as touched" - a whole-format rewrite that reproduces
+        # the same content would still show as touched by git, and the
+        # failure this actually guards against (the model editing its own
+        # test to make it pass) is a real content change, which this
+        # catches precisely without over-flagging a no-op rewrite.
+        return path_matches_any(test_file, changed_files(worktree_path, red_commit))
+
+    if test_file_modified_since_red():
+        log(f"Green phase modified `{test_file}` despite being told not to. "
+            f"Parking: {task_text}", log_path)
+        return finish(STATUS_NEEDS_REVIEW, f"green phase modified the test file `{test_file}`")
+
+    suspicious = suspicious_new_paths(changed_files(worktree_path, red_commit))
+    if suspicious:
+        return finish(STATUS_BLOCKED, f"TDD green phase created garbage filename(s): {suspicious}")
+
+    restore_unnamed_files(worktree_path, base, [test_file, impl_file], log_path)
+    wt.restore_todo(worktree_path, base, args.todo_file)
+    if test_file_modified_since_red():
+        # restore_unnamed_files only protects files the item didn't name;
+        # test_file IS named (it's one of the two expected files), so an
+        # edit to it survives that call and has to be caught here too.
+        return finish(STATUS_NEEDS_REVIEW, f"green phase modified the test file `{test_file}`")
+
+    touched = changed_files(worktree_path, base)
+    record["touched_files"] = touched
+    if not path_matches_any(impl_file, touched):
+        return finish(STATUS_NEEDS_REVIEW, f"green phase never touched `{impl_file}`")
+
+    corrupted = detect_prompt_leakage(worktree_path, touched)
+    if corrupted:
+        return finish(STATUS_BLOCKED, f"prompt text was written into {corrupted} during the green phase")
+
+    scope = [worktree_path / f for f in touched]
+    valid, validation_msg = validate_syntax(worktree_path, log_path, scope)
+
+    validation_attempt = 0
+    while not valid and validation_attempt < args.max_validation_retries:
+        validation_attempt += 1
+        log(f"TDD green phase failed validation (retry {validation_attempt}/"
+            f"{args.max_validation_retries}): {task_text}", log_path)
+        fix_success, _ = run_aider_on_item(worktree_path, (
+            f"The implementation in `{impl_file}` does not yet make the test in "
+            f"`{test_file}` pass.\n\nOriginal task:\n{task_text}\n\n"
+            f"Failure output:\n{validation_msg}\n\n"
+            f"Fix `{impl_file}` so the test passes. Do not modify `{test_file}` "
+            f"or touch any other file."
+        ), log_path, files=[impl_file, test_file])
+        if not fix_success:
+            break
+        if test_file_modified_since_red():
+            return finish(STATUS_NEEDS_REVIEW,
+                         f"a validation-fix retry modified the test file `{test_file}`")
+        restore_unnamed_files(worktree_path, base, [test_file, impl_file], log_path)
+        wt.restore_todo(worktree_path, base, args.todo_file)
+        if test_file_modified_since_red():
+            return finish(STATUS_NEEDS_REVIEW,
+                         f"a validation-fix retry modified the test file `{test_file}`")
+        touched = changed_files(worktree_path, base)
+        record["touched_files"] = touched
+        valid, validation_msg = validate_syntax(worktree_path, log_path,
+                                                scope=[worktree_path / f for f in touched])
+    record["validation_retries"] = validation_attempt
+
+    if not valid:
+        record["validation_output"] = validation_msg[-4000:]
+        return finish(STATUS_BLOCKED, "TDD green phase: validation failed")
+
+    merged, merge_output = wt.merge_ff(project_dir, record["branch"])
+    if not merged:
+        return finish(STATUS_NEEDS_REVIEW, f"passed checks but merge failed: {merge_output}")
+
+    log(f"TDD item merged (test failed red, passed green): {task_text}", log_path)
+    return finish(STATUS_DONE, "TDD: test failed before implementation, passed after")
+
+
 def process_item(project_dir: Path, item: "TodoItem", index: int,
                  args, log_path: Path) -> tuple[str, dict]:
     """Run one item in its own worktree. Returns (status, record).
@@ -1031,6 +1251,19 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
     expected = expected_files(item.text)
     if expected:
         log(f"Handing aider the file(s) the item named: {expected}", log_path)
+
+    if is_tdd_item(item.text):
+        classification = classify_tdd_files(expected)
+        if classification is None:
+            log(f"TDD item but couldn't identify one test file and one implementation "
+                f"file from {expected} (need exactly two named files, one test-shaped). "
+                f"Parking: {item.text}", log_path)
+            return finish(STATUS_NEEDS_REVIEW,
+                         "TDD item did not name exactly one test file and one implementation file")
+        test_file, impl_file = classification
+        task_text = TDD_PREFIX_RE.sub("", item.text, count=1)
+        return run_tdd_phases(project_dir, worktree_path, task_text, test_file, impl_file,
+                              base, args, log_path, record, finish)
 
     success = False
     attempt = 0
