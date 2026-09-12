@@ -441,9 +441,22 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
     """
     backend = cfg("model", "backend", default="aider")
     if backend == "lite":
+        # Default (lite_editor.DEFAULT_NUM_PREDICT, 8000) is sized for
+        # editing existing files, where a genuinely large rewrite is
+        # plausible. A project whose items generate NEW, bounded-length
+        # content (measured: real successes here used 400-900 completion
+        # tokens) should set this lower - a runaway generation that never
+        # reaches a natural stop then fails in ~15s instead of burning
+        # the full budget. Measured directly: one item took 140s and
+        # 16,000 tokens (two attempts at the 8000 cap) before parking,
+        # having produced nothing usable either time.
+        kwargs = {}
+        num_predict = cfg("model", "lite_num_predict", default=None)
+        if num_predict:
+            kwargs["num_predict"] = num_predict
         success, output = lite_editor.run_lite_on_item(
             project_dir, item_text, log_path, files=files,
-            model=model or cfg("model", "author"))
+            model=model or cfg("model", "author"), **kwargs)
         return success, output, lite_editor.last_usage()
     success, output = run_aider_on_item(project_dir, item_text, log_path, files=files, model=model)
     return success, output, parse_aider_token_line(output)
