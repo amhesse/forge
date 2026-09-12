@@ -846,10 +846,34 @@ def expected_files(item_text: str) -> list[str]:
     expected = []
     for m in FILE_PATH_RE.finditer(prose_only):
         after = prose_only[m.end():m.end() + 120]
-        if _negates(m.group(1), after):
+        before = prose_only[max(0, m.start() - 120):m.start()]
+        if _negates_before(before) or _negates(m.group(1), after):
             continue
         expected.append(m.group(1))
     return sorted(set(expected))
+
+
+def _negates_before(before: str) -> bool:
+    """True if a "don't touch this" phrase sits immediately BEFORE a path,
+    with no other path in between - i.e. this path is the one it refers to.
+
+    _negates() below only ever looked at text AFTER a path, which meant it
+    caught "`bar.py`, which is unrelated" but silently missed the far more
+    natural "do not touch `bar.py`" whenever that path was the last one in
+    the item. Measured cost of that gap: on archaeologist's first full
+    run, twelve of twenty parked items were items whose own text ended
+    "...and do not touch `arch/chunk.py`." The loop dutifully required the
+    commit to touch the very file the item forbade touching, and parked
+    every one of them for not doing so.
+    """
+    last = None
+    for m in NEGATION_NEAR_RE.finditer(before):
+        last = m  # nearest phrase to this path wins
+    if last is None:
+        return False
+    # Only this path is negated - if another path appears between the
+    # phrase and here, that one was its target, not this one.
+    return not FILE_PATH_RE.search(before[last.end():])
 
 
 def _negates(path: str, after: str) -> bool:
