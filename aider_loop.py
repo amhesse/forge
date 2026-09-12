@@ -1077,6 +1077,53 @@ def classify_tdd_files(files: list[str]) -> tuple[str, str] | None:
     return (test_like[0], other[0]) if len(test_like) == 1 and len(other) == 1 else None
 
 
+# Used by --models to route items between worker tiers - see
+# estimate_difficulty()'s docstring for the reasoning, and README's
+# "Parallel workers" section for how tiers map to worker slots.
+DIFFICULTY_EASY = "easy"
+DIFFICULTY_HARD = "hard"
+
+
+def estimate_difficulty(item_text: str) -> str:
+    """Classifies an item as "easy" (safe to hand to a smaller/weaker
+    model) or "hard" (wants the strongest model available), for
+    --models to route between worker tiers.
+
+    This is deliberately built on the one difficulty signal this project
+    actually has evidence for, not a guessed heuristic (word count,
+    "sounds complicated") that would just be a second unverified guess on
+    top of the first: an item with a byte-exact content spec is checked
+    byte-for-byte regardless of which model writes it (see
+    extract_exact_content_specs / content_mismatches), so a weaker model
+    getting it wrong costs exactly one parked item, never a silent wrong
+    answer - and the project's own README already names this the single
+    most reliable item shape, precisely because it only asks a model to
+    transcribe, not decide ("Local models transcribe well and decide
+    badly; exact specs play to that."). That's "easy" here in the
+    specific sense that matters for routing: low-stakes to get wrong, not
+    "simple content".
+
+    Everything else defaults to "hard", including TDD items and any item
+    naming more than one file. Both need real judgment this project has
+    only ever measured a 14B model make correctly - TDD's green phase
+    twice needed genuine scope judgment despite ambiguous instructions
+    (see run_tdd_phases' real-model test in the README), and a
+    multi-file item usually exists because two files have to agree with
+    each other (see "Writing items"), which is exactly the failure mode
+    that cost three retries on this project's own history when a
+    weaker model's coordination went wrong. There is no measurement yet
+    that a smaller model handles either reliably, so both default to the
+    strong tier rather than assume they do.
+    """
+    if is_tdd_item(item_text):
+        return DIFFICULTY_HARD
+    if len(expected_files(item_text)) > 1:
+        return DIFFICULTY_HARD
+    if extract_exact_content_specs(item_text):
+        return DIFFICULTY_EASY
+    return DIFFICULTY_HARD
+
+
 def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
                    test_file: str, impl_file: str, base: str, args, log_path: Path,
                    record: dict, finish, model: str | None = None,
@@ -1501,13 +1548,22 @@ def run_parallel(project_dir: Path, todo_path: Path, args, log_path: Path,
     first lands), so a real merge is the fallback, not an error.
 
     Item selection is claim-and-scan under the same lock: re-read the
-    checklist fresh, take the first STATUS_OPEN item not already claimed
+    checklist fresh, take the next STATUS_OPEN item not already claimed
     this run, mark it claimed, release the lock, then do the actual work
     unlocked. Re-reading fresh each time (rather than working from one
     stale snapshot) is what lets a worker notice items another worker has
     already finished; the in-memory `claimed` set is what stops two
     workers claiming the same still-open item in the gap before either of
     them has written a status back.
+
+    Which open item a worker takes first is tiered by slot, not just
+    list order: slot 0 (the first model in `models`) is the strong tier
+    and prefers a "hard" item; every other slot is the weak tier and
+    prefers an "easy" one (see estimate_difficulty()). Either tier falls
+    back to whatever's open if nothing of its preferred difficulty is
+    left, so a worker never sits idle purely because the item it would
+    rather have isn't available yet - the tier is a preference over the
+    queue, not a partition of it.
     """
     git_lock = threading.RLock()
     parked_lock = threading.Lock()
@@ -1515,29 +1571,39 @@ def run_parallel(project_dir: Path, todo_path: Path, args, log_path: Path,
     counter = {"n": 0}
     parked: list[dict] = []
 
-    def claim_next():
+    def claim_next(prefer: str):
         with git_lock:
             if args.max_items is not None and counter["n"] >= args.max_items:
                 return None, None
             _, items = parse_todo(todo_path)
-            for i, item in enumerate(items):
-                if item.status == STATUS_OPEN and i not in claimed:
-                    claimed.add(i)
-                    counter["n"] += 1
-                    return counter["n"], item
-            return None, None
+            open_items = [(i, it) for i, it in enumerate(items)
+                         if it.status == STATUS_OPEN and i not in claimed]
+            if not open_items:
+                return None, None
+            preferred = [(i, it) for i, it in open_items if estimate_difficulty(it.text) == prefer]
+            i, item = preferred[0] if preferred else open_items[0]
+            claimed.add(i)
+            counter["n"] += 1
+            return counter["n"], item
 
     def worker(slot: int, model: str):
+        # Slot 0 is the strong tier by convention - the first model named
+        # is the one a user would put first, and this project's own
+        # measurements only ever showed the 14B (not the 7B) handling the
+        # judgment calls DIFFICULTY_HARD is reserved for.
+        prefer = DIFFICULTY_HARD if slot == 0 else DIFFICULTY_EASY
         while True:
-            index, item = claim_next()
+            index, item = claim_next(prefer)
             if item is None:
                 return
             tag = f"worker {slot}:{model}"
-            log(f"[{tag}] === Item {index}: {item.text.splitlines()[0][:100]} ===", log_path)
+            log(f"[{tag}] === Item {index} ({estimate_difficulty(item.text)}): "
+                f"{item.text.splitlines()[0][:100]} ===", log_path)
             status, record = process_item(project_dir, item, index, args, log_path,
                                           model=model, git_lock=git_lock)
             record["worker"] = slot
             record["model"] = model
+            record["difficulty"] = estimate_difficulty(item.text)
             with git_lock:
                 update_item_status(todo_path, item, status)
                 record_path = record_run(runs_dir, index, record)

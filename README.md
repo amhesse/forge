@@ -197,6 +197,58 @@ merge attempt hits a real conflict, aborts cleanly with zero corruption
 to the checkout, and parks — `git status` afterward shows nothing but the
 loop's own bookkeeping).
 
+### Which item goes to which model
+
+Nothing content-aware here beyond one signal this project actually has
+evidence for. The first model in `--models` is the strong tier and
+prefers a **hard** item; every other model is the weak tier and prefers
+an **easy** one. Either tier falls back to whatever's open if none of its
+preferred difficulty is left, so a worker never idles just because its
+preferred kind of work ran out.
+
+"Easy" means exactly one thing: the item has a byte-exact content spec
+(see *Writing items* below). That's not a claim the *content* is simple —
+it's that getting it wrong is low-stakes, because it's checked
+byte-for-byte regardless of which model writes it, so a weaker model's
+mistake costs one parked item, never a silent wrong answer. This is the
+project's own README claim turned into a routing rule, not a new guess:
+"Local models transcribe well and decide badly; exact specs play to
+that." Everything else — including every TDD item and every item naming
+more than one file — defaults to **hard** and goes to the strong tier,
+because this project has only ever measured the 14B model, not the 7B,
+make the judgment calls those need (TDD's green phase correctly
+overriding an ambiguous placement instruction; a multi-file item's two
+halves actually agreeing with each other).
+
+Verified with a stub checklist mixing easy and hard items in list order
+that deliberately didn't match tier preference: the strong worker skipped
+over an earlier easy item to take a later hard one, the weak worker took
+both easy items, and a follow-up test with more hard items than easy
+confirmed the weak worker falls back to hard work rather than idling once
+its preferred kind ran out — no double-claims, no starvation, all items
+processed.
+
+### What to actually expect, measured
+
+Same two trivial, independent tasks, same machine, immediately before and
+after: **168s sequential** (one 14B worker, one item after another) vs.
+**120s with two workers** (that 14B plus a 7B) — a real 1.4x, not 2x.
+Worth setting expectations by, not the raw worker count:
+
+- The tasks were deliberately easy on both models, so this isolates
+  scheduling overhead from difficulty effects — a mixed real checklist
+  will vary.
+- A duplicate-model "third worker" was also measured, for comparison:
+  fully serialized, ~zero benefit, because Ollama's own
+  `OLLAMA_NUM_PARALLEL` defaults to one generation at a time per model.
+  Concurrency here only ever comes from *different* models running at
+  once, never from adding more of the same one.
+- The smaller model's real-world reliability on non-trivial items is
+  still mostly unmeasured. If it parks more often than the 14B does, that
+  wall-clock gain can shrink or vanish — a park produces nothing for that
+  worker's slot of time, and routing only decides which item a model
+  *attempts*, not whether it succeeds.
+
 ## Writing items
 
 The safety net is only as good as what it can infer from the item text, and
