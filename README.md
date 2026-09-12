@@ -81,7 +81,8 @@ when you're done. A passing item's branch is deleted automatically
 `~/.cache/aider-loop/<project>/`, outside the repo so aider's repo map and
 the preflight scan never walk them; each run also writes one JSON file per
 item there recording the branch, the files touched, and why it landed
-where it did.
+where it did. `review_server.py` (below) does the reading and the
+`git branch -D` for you, with the diff already open.
 
 `--stop-on-problem` restores the old halt-at-the-first-failure behaviour.
 It's off by default now: a failed item can't reach the project, so there
@@ -103,6 +104,47 @@ to hear that now than after an item has spent half an hour in the model.
 Your checklist and `aider_loop.log` are excused: both are the loop's own
 bookkeeping, neither can reach a merge, and being told to commit your todo
 list before the loop will read it is backwards.
+
+## Reviewing what got parked: review_server.py
+
+    python review_server.py --project-dir ~/projects/blockroad
+
+Then open http://127.0.0.1:8765/. A page listing every branch
+`git branch --list 'aider-loop/*'` currently has: the item's own text,
+why it was parked, the diff, and two buttons — **Merge anyway** and
+**Discard**. Ctrl+C stops it; nothing runs until a button is clicked, and
+every click asks for confirmation first.
+
+The branch is the source of truth, not the JSON run record — the same
+principle as the worktree design above. A branch can outlive its record
+(an old `~/.cache` cleaned up separately) or the record can outlive the
+branch (already handled by hand); either way, what's actually still
+sitting there needing a decision is whatever `git branch` currently
+lists, so that's what drives the page. A record is only ever used for
+context when one still exists for that branch.
+
+Both buttons are real `git` operations on the project's actual
+checkout — the same commands the *Worktrees* section above tells you to
+run by hand, just with the diff already open and no typing the branch
+name three times:
+
+- **Merge anyway** runs `git merge --no-ff <branch>`. A parked item was
+  never applied to the checkout in the first place, so this isn't
+  undoing a revert — it's a human overriding "needs review" or "blocked"
+  after actually reading the diff. A conflict is reported back and the
+  merge is aborted automatically, not silently resolved.
+- **Discard** runs `git branch -D <branch>`. Nothing else is touched.
+
+Every POST re-checks the branch name against the live branch list before
+doing anything — a stale click (the branch was already handled another
+way) or a request naming something that was never a pending item (even
+`master`) gets a message back, not a git command run against an
+unintended ref.
+
+No login, no token: there's nothing reachable here that isn't already a
+`git` command sitting in your own shell history, and it binds to
+`127.0.0.1` only. Stdlib only, like `aider_loop.py` itself — a browser
+tab and a project directory are the only things this needs.
 
 ## Writing items
 

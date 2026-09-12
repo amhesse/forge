@@ -1456,8 +1456,7 @@ def main():
 
     preflight_repo_size(project_dir, log_path)
 
-    runs_dir = (Path.home() / ".cache" / "aider-loop" / project_dir.name / "runs"
-                / datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    runs_dir = wt.runs_root(project_dir) / datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
     log(f"Starting aider_loop on {project_dir} (run log: {runs_dir})", log_path)
 

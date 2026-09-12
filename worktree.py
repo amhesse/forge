@@ -133,6 +133,14 @@ def worktrees_root(project_dir: Path) -> Path:
     return Path.home() / ".cache" / "aider-loop" / project_dir.name / "worktrees"
 
 
+def runs_root(project_dir: Path) -> Path:
+    """Where this project's per-run JSON records live (see
+    aider_loop.record_run) - one directory per invocation, one
+    item-NNN.json per item processed in it. Shared here so a review tool
+    can find them without duplicating the path."""
+    return Path.home() / ".cache" / "aider-loop" / project_dir.name / "runs"
+
+
 def prune_stale(project_dir: Path, log=print) -> list[str]:
     """Remove worktrees left behind by a run that was killed.
 
