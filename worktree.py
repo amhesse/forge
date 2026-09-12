@@ -133,6 +133,37 @@ def worktrees_root(project_dir: Path) -> Path:
     return Path.home() / ".cache" / "aider-loop" / project_dir.name / "worktrees"
 
 
+def prune_stale(project_dir: Path, log=print) -> list[str]:
+    """Remove worktrees left behind by a run that was killed.
+
+    A run that dies between `create()` and `remove()` -- OOM, Ctrl+C, a
+    reboot -- leaves its worktree checked out and registered with git.
+    Nothing cleans those up on its own, so they accumulate, each one
+    holding a branch that `git branch -D` will then refuse to delete.
+    Measured: an OOM kill during an item left exactly this behind.
+
+    Only the working directories go. The branches stay, because a killed
+    item's branch may hold real work and is the same thing a parked item's
+    branch is -- something to read, not something to silently discard.
+    """
+    root = worktrees_root(project_dir)
+    if not root.is_dir():
+        return []
+    removed = []
+    for path in sorted(root.iterdir()):
+        if not path.is_dir():
+            continue
+        _git(["worktree", "remove", "--force", str(path)], project_dir)
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+        removed.append(path.name)
+    _git(["worktree", "prune"], project_dir)
+    if removed:
+        log(f"Cleaned up {len(removed)} worktree(s) left by an earlier run that was "
+            f"killed: {', '.join(removed)}. Their branches were kept.")
+    return removed
+
+
 def branch_name(index: int) -> str:
     return f"aider-loop/item-{index}-{time.strftime('%Y%m%d-%H%M%S')}"
 

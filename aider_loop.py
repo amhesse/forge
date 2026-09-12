@@ -1192,6 +1192,11 @@ def main():
         print(f"{project_dir} is not a git repo; per-item worktrees need one.")
         sys.exit(1)
 
+    # Before the cleanliness check, not after: a worktree abandoned by a
+    # killed run doesn't dirty the checkout, but it does hold a branch and
+    # it will never be collected otherwise.
+    wt.prune_stale(project_dir, log=lambda m: log(m, log_path))
+
     # The checklist and the loop's own log are excused - see is_clean().
     clean, dirty = wt.is_clean(project_dir, exempt=(args.todo_file, "aider_loop.log"))
     if not clean:
