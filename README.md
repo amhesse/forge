@@ -8,6 +8,7 @@ markdown checklist, with a safety net between each item and the next.
     forge run --project-dir ~/projects/thing --todo-file TODO.md
     forge draft --project-dir ~/projects/thing --goal "..."
     forge review --project-dir ~/projects/thing
+    forge eval                                    # forge's own regression suite
 
 Stdlib only — no dependency ever needs installing for the package itself,
 only for the project you point it at. `pipx` is the right tool on a
@@ -568,6 +569,27 @@ stripping tests exist because the first real `lite` run wrote a literal
 ` ```python ` into every file. A tool that enforces TDD on every project
 it touches had, until this section, none of its own; these are not
 exhaustive, but every one of them is load-bearing.
+
+    forge eval
+
+The other half, one level up: `unittest discover` checks pure functions
+in isolation, in milliseconds. `forge eval` runs the real installed
+`forge run` command end-to-end against throwaway git repos with a stub
+`aider`, and asserts the actual observable outcome - which items merged,
+which parked, whether a forbidden file ever reached a real checkout.
+Slower (seconds, not milliseconds) and heavier, but it's the level every
+real bug found this session actually lived at: a wrong merge decision, a
+file that shouldn't exist, a status that doesn't match what happened.
+Run it after any change to the loop's own logic, before trusting it
+against a real project.
+
+It was built by running this exact command against this exact repo -
+`forge` wrote its own `eval.py` and wired its own `eval` subcommand into
+`cli.py`, both merged through its own worktree-and-checks pipeline, no
+different from any other project this tool has been pointed at. The one
+real snag was a self-inflicted item-authoring mistake (a byte-exact spec
+written for a single line inside a larger file, which the checker always
+compares against the WHOLE file) - caught, fixed, re-run, merged clean.
 
 ## What it is not
 
