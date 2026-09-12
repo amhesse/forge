@@ -2,12 +2,11 @@
 
 [model]
 # Ollama name of the model aider writes with (no "ollama/" prefix). Used to
-# free its VRAM before a review call -- on a single GPU the reviewer
-# otherwise queues behind it and can exceed the review timeout.
+# check its context size before each item.
 author = "qwen25-coder-aider"
-# Default for --review-model. Ideally a DIFFERENT family from `author`;
-# a model reviewing its own family shares its blind spots.
-review = "qwen2.5-coder:7b"
+# Passed to aider as --edit-format (overrides .aider.conf.yml). "diff" is
+# the default; "whole" makes the model re-emit every file it edits.
+edit_format = "diff"
 
 [validate]
 # Built-in syntax checkers, run over the files each item changed.

@@ -14,6 +14,9 @@ that the previous checks missed.
 ## What it checks, in order
 
 1. **Did aider crash?** Retried `--max-retries` times.
+   Then, if the item names files, **any other file it changed is put back**
+   (and a new one deleted) before anything else runs, so the checks below
+   judge the task alone. Turn off with `[scope] restore_unnamed = false`.
 2. **Byte-exact content match.** If an item spelled out a file's target
    content (see *Writing items* below), the result is compared to it
    byte-for-byte. This is the only check that is not a heuristic, and it is
@@ -26,8 +29,6 @@ that the previous checks missed.
    named after the model's reasoning text. Also an instant revert.
 6. **Syntax**, over the changed files only, plus whatever `[validate]
    commands` the project declares.
-7. **Second opinion** from a different local model, if `--review-model` is
-   set.
 
 Anything worse than "fine" stops the run rather than letting the next item
 build on top of an unreviewed change. Failures are reverted to the
@@ -76,9 +77,9 @@ file is optional; without it the loop uses inert defaults.
 ```toml
 [model]
 author = "qwen25-coder-aider"   # ollama name, no "ollama/" prefix.
-                                # Unloaded before a review call so the
-                                # reviewer isn't queued behind its VRAM.
-review  = "qwen2.5-coder:7b"    # default for --review-model
+                                # Used to check its context size.
+edit_format = "diff"            # passed to aider as --edit-format.
+                                # The default; overrides .aider.conf.yml.
 
 [validate]
 checks   = ["python", "js-html"]           # built-ins; omit to enable both
@@ -95,6 +96,21 @@ untouched file is not.
 
 Aider's own model settings still come from the project's `.aider.conf.yml`;
 this file doesn't replace it.
+
+## Edit format: diff by default
+
+The loop passes `--edit-format diff` to aider, overriding whatever the
+project's `.aider.conf.yml` says. `whole` was used first. On
+qwen2.5-coder:14b it repeatedly left out the filename line before a file
+block, so aider applied nothing. It also costs the file twice out of the
+context window (once read, once rewritten), capping a 32k context at roughly
+800 lines of Python per item. With `diff` the model only emits the changed
+hunk, and a failed SEARCH match is caught by the garbage-filename and
+touched-files checks above.
+
+Set `edit_format = "whole"` under `[model]` to go back for a model that
+handles SEARCH/REPLACE badly. Either way, keep items to one file where you
+can.
 
 ## .aiderignore is not optional
 
@@ -124,7 +140,8 @@ models. `node` is optional and enables JS/HTML syntax checking.
 This does not make a local model trustworthy. In measured use it was
 reliable on exact-content items and needed correction on **every**
 open-ended one — the failures being confident, plausible, and wrong rather
-than obviously broken. The review pass has also approved diffs containing
-real defects, especially when the reviewer shares a family with the author.
+than obviously broken. A second-model review pass used to exist and was
+removed: it rejected correct, test-verified diffs and approved defective
+ones, so it added stops without adding safety. The tests are the check.
 
 Read the diffs.

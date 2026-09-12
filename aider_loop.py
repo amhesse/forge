@@ -23,15 +23,11 @@ Each item goes through, in order:
      relying on aider's own --auto-test for this - it isn't reliably applied
      in this exact headless --message mode, see validate_python()'s
      docstring.)
-  4. Optionally, a second-opinion review from a local model (--review-model)
-     - ideally a *different* model than whatever wrote the code, since a
-     model reviewing its own work shares its own blind spots. A "no" marks
-     '?' and stops the run there too.
   Only once all of that passes does an item get marked done ('x').
 
 Usage:
     python aider_loop.py --project-dir ~/projects/kids-maze-game
-    python aider_loop.py --project-dir ~/projects/chore-tracker --max-items 1 --review-model deepseek-coder-v2
+    python aider_loop.py --project-dir ~/projects/chore-tracker --max-items 1
 
 Requires:
     - aider installed and on PATH (aider-chat)
@@ -39,11 +35,10 @@ Requires:
         - [ ] Add walking animation for Aerie
         - [ ] Add sound effects
         - [x] Base maze game working
-        - [?] Something aider/the review pass couldn't confirm - look at this one
+        - [?] Something the checks couldn't confirm - look at this one
         - [!] Something that failed and got reverted
       (a different filename is fine via --todo-file)
     - Ollama running locally with the model configured in .aider.conf.yml
-      (and, if using --review-model, that model pulled too)
 """
 
 import argparse
@@ -65,8 +60,8 @@ CONFIG_FILENAME = ".aiderloop.toml"
 
 # Filled in by load_config() at startup from the project's .aiderloop.toml.
 # Defaults are deliberately inert: with no config file the loop still runs,
-# it just can't free the author model's VRAM before a review (see
-# review_with_model) or run any project-specific test command.
+# it just can't check the author model's context size or run any
+# project-specific test command.
 CONFIG: dict = {}
 
 
@@ -78,7 +73,7 @@ def load_config(project_dir: Path) -> dict:
 
         [model]
         author = "qwen25-coder-aider"   # ollama name, no "ollama/" prefix
-        review = "qwen2.5-coder:7b"     # default for --review-model
+        edit_format = "diff"            # passed to aider; "whole" to override
 
         [validate]
         checks   = ["python", "js-html"]          # built-ins; omit to auto-detect
@@ -121,7 +116,12 @@ STATUS_NEEDS_REVIEW = "?"  # aider produced *something* and it built, but an
 # File paths referenced in backticks in a task's text, e.g. "In `src/foo.jsx`,
 # do X" - used to sanity-check that aider actually touched the file(s) the
 # task named, rather than trusting "it built" alone.
-FILE_PATH_RE = re.compile(r"`([\w./-]+\.(?:jsx?|tsx?|py|json|css|html|md|ya?ml|txt|cfg|ini|toml))`")
+# Any extension, as long as it starts with a letter (so `3.11` isn't a file).
+# This used to be a fixed list of extensions, which was harmless while it only
+# fed the touched-files check -- but restore_unnamed_files() reverts whatever
+# isn't named, so an unlisted extension (a project's own `.story` files) would
+# have had each task's real output deleted.
+FILE_PATH_RE = re.compile(r"`([\w./-]*[\w-]\.[A-Za-z][A-Za-z0-9]{0,7})`")
 
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_VALIDATION_RETRIES = 1  # separate from DEFAULT_MAX_RETRIES: this
@@ -284,6 +284,12 @@ def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path) -> tupl
         "--stream",           # stream tokens live so you can watch progress
         "--no-restore-chat-history",  # each task starts with a clean context,
                                        # not the accumulated history of prior tasks
+        # Central default, overridable per project in .aiderloop.toml. diff
+        # (SEARCH/REPLACE) replaced whole-file output after a measured run on
+        # qwen2.5-coder:14b where `whole` repeatedly dropped the filename line
+        # before a file block, so aider applied nothing -- and a whole-file
+        # edit costs two copies of the file out of the context window.
+        "--edit-format", cfg("model", "edit_format", default="diff"),
         "--message", prompt,
     ]
 
@@ -927,85 +933,41 @@ def changed_files(project_dir: Path, pre_hash: str) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def changed_diff(project_dir: Path, pre_hash: str, max_chars: int = 12000) -> str:
-    result = subprocess.run(
-        ["git", "diff", pre_hash, "HEAD"],
-        cwd=str(project_dir), capture_output=True, text=True,
-    )
-    diff = result.stdout if result.returncode == 0 else ""
-    return diff[:max_chars]
-
-
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
-
-# A standalone YES/NO line, anywhere in the output. Deliberately NOT anchored
-# to "the first line" - reasoning models (deepseek-r1 and similar) always
-# emit a "Thinking..." preamble first regardless of prompt instructions, so
-# the real verdict shows up later, after a "...done thinking." marker. Found
-# by testing this against real deepseek-r1:32b output, where the verdict
-# line was the *last* YES/NO in the response, not the first line.
-VERDICT_LINE_RE = re.compile(r"^\s*(YES|NO)\b", re.IGNORECASE | re.MULTILINE)
-
-
-def review_with_model(model: str, item_text: str, diff: str, log_path: Path) -> tuple[bool, str]:
-    """
-    Asks a local Ollama model whether a diff actually satisfies a todo item.
-    Ideally this is a *different* model than whichever one wrote the code
-    (set via .aider.conf.yml) - a model reviewing its own work tends to
-    share the same blind spots that produced the bug in the first place,
-    so self-review catches less than a second, independent model would.
-
-    Returns (satisfied, raw_response). Any failure to get a clean verdict is
-    treated as NOT satisfied - a review step that itself breaks, times out,
-    or returns something unparseable should never silently wave everything
-    through as done.
-    """
-    prompt = (
-        "You are reviewing a code change against a task description. "
-        "State your verdict as a single word on its own line: YES if the "
-        "diff fully and correctly implements the task, or NO if it does "
-        "not (wrong files touched, task left incomplete, unrelated/off-task "
-        "change, obviously broken code, etc). Put that YES/NO line at the "
-        "very end of your response, after any reasoning, so it's your last "
-        "word. Briefly say why in 1-3 sentences either before or after it.\n\n"
-        f"TASK:\n{item_text}\n\nDIFF:\n{diff}\n"
-    )
-    # Free the authoring model's VRAM first. Ollama holds a model resident
-    # for keep_alive (4 min by default) after its last request, so on a
-    # single-GPU box the review request otherwise QUEUES behind it rather
-    # than loading alongside: measured 3.6s for this exact call with nothing
-    # else resident, versus a 300s timeout inside the loop, where the ~240s
-    # keep-alive plus load time overran the deadline. The author's turn for
-    # this item is finished by the time we get here, so unloading it costs
-    # only a reload on the next item -- seconds, from page cache.
-    author = cfg("model", "author")
-    if author:
-        subprocess.run(["ollama", "stop", author],
-                       capture_output=True, text=True, timeout=30)
-
-    try:
-        result = subprocess.run(
-            ["ollama", "run", model, prompt],
-            capture_output=True, text=True, timeout=300,
-        )
-    except Exception as e:
-        log(f"Review model call failed to run: {e}", log_path)
-        return False, str(e)
-
-    output = (result.stdout or "") + (result.stderr or "")
-    if result.returncode != 0:
-        log(f"Review model exited non-zero: {output.strip()[:500]}", log_path)
-        return False, output
-
-    clean_output = ANSI_ESCAPE_RE.sub("", output)
-    verdicts = VERDICT_LINE_RE.findall(clean_output)
-    if not verdicts:
-        log(f"Review model gave no parseable YES/NO verdict, treating as NO: "
-            f"{clean_output.strip()[:500]}", log_path)
-        return False, output
-
-    satisfied = verdicts[-1].upper() == "YES"
-    return satisfied, output
+# A task that names its files is also a promise about what it won't touch.
+# Found on a real run: asked to create art/car-blue.txt "same shape as
+# art/car-red.txt", the model also rewrote car-red.txt, then read the
+# resulting test failure as car-red's fault and edited it again on every
+# retry. Nothing else caught it -- the touched-files check only asks whether
+# the named files changed, not whether others did. Putting unnamed files back
+# before validation means the tests judge the task alone, and the retry
+# feedback points at the file the model was actually asked to write.
+def restore_unnamed_files(project_dir: Path, pre_hash: str, expected: list[str],
+                          log_path: Path) -> list[str]:
+    """Reverts every file changed since pre_hash that the task didn't name,
+    commits the restoration, and returns the paths restored. Does nothing
+    when the task named no files (there's no scope to enforce) or when the
+    project sets [scope] restore_unnamed = false."""
+    if not expected or not cfg("scope", "restore_unnamed", default=True):
+        return []
+    extra = [f for f in changed_files(project_dir, pre_hash)
+             if not any(path_matches_any(e, [f]) for e in expected)]
+    if not extra:
+        return []
+    for rel in extra:
+        existed = subprocess.run(["git", "cat-file", "-e", f"{pre_hash}:{rel}"],
+                                 cwd=str(project_dir), capture_output=True).returncode == 0
+        if existed:
+            subprocess.run(["git", "checkout", pre_hash, "--", rel],
+                           cwd=str(project_dir), capture_output=True)
+        else:
+            subprocess.run(["git", "rm", "-q", "-f", "--", rel],
+                           cwd=str(project_dir), capture_output=True)
+    subprocess.run(["git", "add", "-A", "--", *extra], cwd=str(project_dir), capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m",
+                    f"aider-loop: restore files the task didn't name: {', '.join(extra)}"],
+                   cwd=str(project_dir), capture_output=True)
+    log(f"Restored file(s) the task didn't name: {extra} (task named: {expected})", log_path)
+    return extra
 
 
 def main():
@@ -1026,13 +988,6 @@ def main():
                               "are exhausted does the item get marked blocked and reverted.")
     parser.add_argument("--sleep-between", default=DEFAULT_SLEEP_BETWEEN_ITEMS, type=int,
                          help="Seconds to pause between items (Ctrl+C window)")
-    parser.add_argument("--review-model", default=None, type=str,
-                         help="Ollama model to run a second-opinion review pass with after an "
-                              "item builds successfully (e.g. deepseek-coder-v2). Ideally a "
-                              "different model than the one that wrote the code, to avoid "
-                              "self-review blind spots. If it says the diff doesn't satisfy "
-                              "the task, the item is marked '?' (needs review) and the run "
-                              "stops there instead of continuing. Omit to skip this pass.")
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir).expanduser().resolve()
@@ -1063,8 +1018,6 @@ def main():
             f"commands, preflight limits).", log_path)
 
     preflight_repo_size(project_dir, log_path)
-
-    review_model = args.review_model or cfg("model", "review")
 
     log(f"Starting aider_loop on {project_dir}", log_path)
 
@@ -1113,8 +1066,9 @@ def main():
         stop_run = False
         touched: list[str] = []
         if use_git and pre_hash:
-            touched = changed_files(project_dir, pre_hash)
             expected = expected_files(item.text)
+            restore_unnamed_files(project_dir, pre_hash, expected, log_path)
+            touched = changed_files(project_dir, pre_hash)
             missing = [f for f in expected if not path_matches_any(f, touched)]
 
             # Checked first and most trusted: when the task spelled out a
@@ -1206,6 +1160,7 @@ def main():
             # Recompute: the fix attempt may have touched files the first
             # attempt didn't.
             if use_git and pre_hash:
+                restore_unnamed_files(project_dir, pre_hash, expected, log_path)
                 touched = changed_files(project_dir, pre_hash)
                 scope = [project_dir / f for f in touched]
             valid, validation_msg = validate_syntax(project_dir, log_path, scope)
@@ -1220,35 +1175,6 @@ def main():
             log(f"=== Finished item ({items_processed} total this run) ===\n", log_path)
             time.sleep(args.sleep_between)
             continue
-
-        # Optional second opinion from a (ideally different) local model,
-        # since "it built" doesn't mean "it's correct" - see the corrupted
-        # index.html and the silently-skipped edit-capability tasks from
-        # past runs, both of which built fine.
-        if review_model and use_git and pre_hash:
-            diff = changed_diff(project_dir, pre_hash)
-            satisfied, review_output = review_with_model(review_model, item.text, diff, log_path)
-            if not satisfied:
-                # review_with_model() fails closed, so `not satisfied` covers
-                # both "the reviewer said NO" and "the reviewer never answered"
-                # (timeout, non-zero exit, unparseable output). Those need
-                # different responses from a human -- one is a code problem,
-                # the other means the review step itself is broken -- so say
-                # which happened rather than attributing a verdict the model
-                # may never have given.
-                verdict_given = bool(VERDICT_LINE_RE.findall(
-                    ANSI_ESCAPE_RE.sub("", review_output or "")))
-                how = ("flagged this diff as not satisfying"
-                       if verdict_given else
-                       "could not be reached for a verdict on")
-                log(f"Review model ({review_model}) {how} "
-                    f"the task. Marking needs-review: {item.text}\nReview output: {review_output.strip()[:1000]}",
-                    log_path)
-                item.status = STATUS_NEEDS_REVIEW
-                write_todo(todo_path, raw_lines, items)
-                items_processed += 1
-                log("Stopping run at a needs-review item rather than continuing on top of it.", log_path)
-                break
 
         log(f"Marking done: {item.text}", log_path)
         item.status = STATUS_DONE
