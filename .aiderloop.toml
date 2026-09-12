@@ -1,0 +1,17 @@
+# forge working on itself. lite backend, no aider dependency needed for
+# a project that's already pure stdlib Python. The gate is this
+# project's own test suite - see "Running this project's own tests" in
+# README.md for why PYTHONPATH=src rather than an installed package: an
+# item's worktree is a plain git checkout, not a pipx venv, so nothing
+# here is importable without it.
+
+[model]
+backend = "lite"
+author = "qwen25-coder-aider"
+
+[validate]
+checks = ["python"]
+commands = ["PYTHONPATH=src python3 -m unittest discover -s tests -q"]
+
+[worker]
+models = ["qwen25-coder-aider", "qwen2.5-coder:7b"]
