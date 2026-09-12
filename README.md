@@ -9,6 +9,12 @@ local model will confidently produce work that is wrong in ways that still
 compile, and the checks below exist because each one caught a real failure
 that the previous checks missed.
 
+Every item runs in its own `git worktree`, branched from the project's
+current HEAD. Only an item that passes every check is merged back. A
+failure is never applied at all, so there is nothing to undo and no reason
+to stop — the run keeps going, and each parked item's work is left on its
+own branch to read in the morning.
+
     aider_loop.py --project-dir ~/projects/thing --todo-file TODO.md
 
 ## What it checks, in order
@@ -30,12 +36,61 @@ that the previous checks missed.
 6. **Syntax**, over the changed files only, plus whatever `[validate]
    commands` the project declares.
 
-Anything worse than "fine" stops the run rather than letting the next item
-build on top of an unreviewed change. Failures are reverted to the
-pre-item commit; softer outcomes are left in place and marked.
+Anything worse than "fine" is *parked*: the item's branch is left behind,
+the project checkout never sees it, and the next item starts from the same
+base. Nothing is reverted, because nothing was ever applied.
 
-Item status markers: `[ ]` open, `[x]` done, `[!]` blocked and reverted,
+Item status markers: `[ ]` open, `[x]` done and merged, `[!]` blocked,
 `[?]` needs review.
+
+## Worktrees, and what happens to a failed item
+
+The loop used to run items directly in the project checkout. That forced
+two behaviours it could never get out of: a failure had to be undone with
+`git reset --hard` in the tree you were working in, and the run had to
+*stop* at the first unreviewed change so the next item wouldn't build on
+top of it. Both are the same problem — there was only one working tree, so
+"keep going" and "don't build on this" were in conflict. Reverting was
+also the risky half: it wrote to your tree, and it destroyed the evidence.
+
+Now each item gets a throwaway checkout on branch `aider-loop/item-N-<date>`.
+Everything happens in there. A passing item fast-forwards the real branch;
+a failing one is simply never merged. At the end of a run you get:
+
+```
+2 item(s) did not pass and were never applied to the project.
+  [?] aider-loop/item-2-20260911-231021 - named file(s) ['never_touched.py'] were never touched
+  [!] aider-loop/item-3-20260911-231021 - validation failed
+```
+
+Read one with `git log -p aider-loop/item-2-...`, and `git branch -D` it
+when you're done. A passing item's branch is deleted automatically
+(`--keep-branches` keeps it). Worktrees live under
+`~/.cache/aider-loop/<project>/`, outside the repo so aider's repo map and
+the preflight scan never walk them; each run also writes one JSON file per
+item there recording the branch, the files touched, and why it landed
+where it did.
+
+`--stop-on-problem` restores the old halt-at-the-first-failure behaviour.
+It's off by default now: a failed item can't reach the project, so there
+is nothing to stop for.
+
+### What the loop requires of your checkout
+
+A worktree is populated from a commit, so it contains tracked files and
+nothing else. Gitignored config that aider needs — `.aider.conf.yml`,
+`.aider.model.settings.yml`, `.aiderignore`, `.aiderloop.toml` — is copied
+in, and `.venv` / `node_modules` are symlinked rather than copied (one of
+these projects has a 317MB venv; duplicating it per item is not a thing to
+do). Without that copy step a project whose aider config is gitignored
+would run against whatever `~/.aider.conf.yml` says, silently.
+
+The run also refuses to start if the checkout has uncommitted changes to
+tracked files, because `git merge --ff-only` won't run over them — better
+to hear that now than after an item has spent half an hour in the model.
+Your checklist and `aider_loop.log` are excused: both are the loop's own
+bookkeeping, neither can reach a merge, and being told to commit your todo
+list before the loop will read it is backwards.
 
 ## Writing items
 
@@ -134,6 +189,12 @@ out/
 
 Python 3.11+ (stdlib only), `aider`, `git`, and `ollama` if using local
 models. `node` is optional and enables JS/HTML syntax checking.
+
+`git` is now a hard requirement rather than a warning — per-item worktrees
+are what keep a failed item away from your checkout, and there is no
+sensible way to degrade that. The old non-git path ran items directly in
+the tree and left broken changes in place for the next item to build on,
+which is exactly what worktrees replaced.
 
 ## What it is not
 

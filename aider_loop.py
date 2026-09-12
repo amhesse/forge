@@ -53,6 +53,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import worktree as wt
+
 CHECKBOX_RE = re.compile(r"^(?P<indent>\s*)-\s\[(?P<mark>[ xX!?])\]\s(?P<text>.+)$")
 
 STATUS_OPEN = " "
@@ -660,27 +662,12 @@ def git_head(project_dir: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def git_revert_to(project_dir: Path, commit_hash: str, log_path: Path) -> None:
-    """
-    Hard-resets the repo back to commit_hash, discarding any commit(s) aider
-    made for a blocked item plus any leftover uncommitted changes to tracked
-    files. Without this, a broken/off-task commit stays in git history and
-    the *next* item's aider run silently builds on top of known-bad code -
-    which is exactly how a corrupted index.html once slid through unnoticed
-    for several items in a row.
-
-    Deliberately does NOT run `git clean` - this project (and others this
-    script runs against) keeps working files that are intentionally
-    untracked but not gitignored (this log file, this script itself,
-    package-lock.json), and a blanket untracked-file clean would delete
-    those out from under the still-running process. Reset only touches
-    tracked files, which is where the actual corruption risk lives.
-    """
-    current = git_head(project_dir)
-    if current is None or current == commit_hash:
-        return  # not a git repo, or aider made no commits - nothing to revert
-    subprocess.run(["git", "reset", "--hard", commit_hash], cwd=str(project_dir), capture_output=True, text=True)
-    log(f"Reverted repo to {commit_hash[:8]} (discarded {current[:8]} and any uncommitted changes to tracked files)", log_path)
+# NOTE: git_revert_to() used to live here, hard-resetting the project
+# checkout after a failed item. Per-item worktrees removed the need for it:
+# a failed item's commits are made on a throwaway branch and simply never
+# merged, so there is nothing in the project to undo. Reverting was always
+# the risky half of the design -- it wrote to the tree the user was working
+# in, and it discarded the evidence.
 
 
 # Phrases that, when they appear shortly after a backtick-quoted file path,
@@ -970,6 +957,147 @@ def restore_unnamed_files(project_dir: Path, pre_hash: str, expected: list[str],
     return extra
 
 
+def record_run(runs_dir: Path, index: int, record: dict) -> Path:
+    """Write one item's outcome to the run log directory.
+
+    The todo file records a single character per item; that was enough
+    when a run stopped at the first problem and you went straight to the
+    terminal scrollback. Once the loop parks failures and keeps going, an
+    overnight run ends with several parked items and no way to tell what
+    happened to each without re-reading a thousand lines of interleaved
+    log. This is the queue a review UI reads later: the item text, the
+    branch its work is sitting on, what the checks said, and why.
+    """
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    path = runs_dir / f"item-{index:03d}.json"
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def process_item(project_dir: Path, item: "TodoItem", index: int,
+                 args, log_path: Path) -> tuple[str, dict]:
+    """Run one item in its own worktree. Returns (status, record).
+
+    The project checkout is only ever written to by the final
+    fast-forward, and only for an item that passed every check. A failure
+    is not reverted, because it was never applied -- it stays on its own
+    branch and the caller moves to the next item from the same base.
+    """
+    base = git_head(project_dir)
+    record: dict = {
+        "index": index,
+        "item": item.text,
+        "base": base,
+        "started": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+
+    worktree_path, branch = wt.create(project_dir, index, base)
+    record["branch"] = branch
+    actions = wt.materialize(project_dir, worktree_path)
+    log(f"Worktree {worktree_path} on {branch}"
+        + (f" ({', '.join(actions)})" if actions else " (nothing to materialize)"), log_path)
+
+    def finish(status: str, reason: str) -> tuple[str, dict]:
+        record["status"] = status
+        record["reason"] = reason
+        record["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
+        # A parked item's branch is the only copy of what the model wrote.
+        wt.remove(project_dir, worktree_path, branch,
+                  keep_branch=(status != STATUS_DONE) or args.keep_branches)
+        return status, record
+
+    success = False
+    attempt = 0
+    while attempt <= args.max_retries and not success:
+        attempt += 1
+        if attempt > 1:
+            log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
+        success, _ = run_aider_on_item(worktree_path, item.text, log_path)
+    record["aider_attempts"] = attempt
+
+    if not success:
+        log(f"Aider failed after {attempt} attempt(s), parking blocked: {item.text}", log_path)
+        return finish(STATUS_BLOCKED, f"aider itself failed after {attempt} attempt(s)")
+
+    expected = expected_files(item.text)
+    restore_unnamed_files(worktree_path, base, expected, log_path)
+    if wt.restore_todo(worktree_path, base, args.todo_file):
+        log(f"Item edited {args.todo_file}; restored it (the checklist is the "
+            f"loop's bookkeeping, not the item's work).", log_path)
+    touched = changed_files(worktree_path, base)
+    record["expected_files"] = expected
+    record["touched_files"] = touched
+
+    # Byte-exact first: the only check here that isn't a heuristic.
+    mismatched = content_mismatches(worktree_path, extract_exact_content_specs(item.text))
+    if mismatched:
+        log(f"Content doesn't match the task's exact spec for {mismatched}. Parking: {item.text}", log_path)
+        return finish(STATUS_BLOCKED, f"content did not match the exact spec for {mismatched}")
+
+    missing = [f for f in expected if not path_matches_any(f, touched)]
+    if expected and missing:
+        log(f"Expected file(s) not touched: {missing} (touched: {touched or 'nothing'}). "
+            f"Parking needs-review: {item.text}", log_path)
+        return finish(STATUS_NEEDS_REVIEW, f"named file(s) {missing} were never touched")
+
+    corrupted = detect_prompt_leakage(worktree_path, touched)
+    if corrupted:
+        log(f"Prompt-leakage marker found in {corrupted}. Parking: {item.text}", log_path)
+        return finish(STATUS_BLOCKED, f"prompt text was written into {corrupted} as content")
+
+    suspicious = suspicious_new_paths(touched)
+    if suspicious:
+        log(f"Garbage-looking filename(s) created: {suspicious}. Parking: {item.text}", log_path)
+        return finish(STATUS_BLOCKED, f"garbage filename(s) created: {suspicious}")
+
+    scope = [worktree_path / f for f in touched]
+    valid, validation_msg = validate_syntax(worktree_path, log_path, scope)
+
+    validation_attempt = 0
+    while not valid and validation_attempt < args.max_validation_retries:
+        validation_attempt += 1
+        log(f"Validation failed (retry {validation_attempt}/{args.max_validation_retries}), "
+            f"asking aider to fix it: {item.text}", log_path)
+        fix_success, _ = run_aider_on_item(worktree_path, (
+            f"The previous change for this task did not pass validation.\n\n"
+            f"Original task:\n{item.text}\n\n"
+            f"Validation failure output:\n{validation_msg}\n\n"
+            f"Fix the failure above while still completing the original task. "
+            f"Do not revert or abandon the original change; correct it."
+        ), log_path)
+        if not fix_success:
+            log(f"Aider itself failed during the validation-fix retry for: {item.text}", log_path)
+            break
+        restore_unnamed_files(worktree_path, base, expected, log_path)
+        wt.restore_todo(worktree_path, base, args.todo_file)
+        touched = changed_files(worktree_path, base)
+        record["touched_files"] = touched
+        valid, validation_msg = validate_syntax(worktree_path, log_path, scope=[worktree_path / f for f in touched])
+    record["validation_retries"] = validation_attempt
+
+    if not valid:
+        record["validation_output"] = validation_msg[-4000:]
+        log(f"Validation failed, parking blocked: {item.text}", log_path)
+        return finish(STATUS_BLOCKED, "validation failed")
+
+    if not touched:
+        # Every check above passes vacuously when nothing changed, and the
+        # merge below would be a no-op marked done -- the exact silent
+        # false-'done' the touched-files check exists to prevent, reachable
+        # here whenever the item named no files for it to check.
+        log(f"Item changed nothing at all. Parking needs-review: {item.text}", log_path)
+        return finish(STATUS_NEEDS_REVIEW, "the item produced no changes")
+
+    merged, merge_output = wt.merge_ff(project_dir, branch)
+    if not merged:
+        log(f"Item passed but could not fast-forward the project: {merge_output}", log_path)
+        return finish(STATUS_NEEDS_REVIEW, f"passed checks but merge failed: {merge_output}")
+
+    log(f"Merged {branch} and marking done: {item.text}", log_path)
+    record["merged"] = git_head(project_dir)
+    return finish(STATUS_DONE, "passed every check and was merged")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unattended Aider loop runner")
     parser.add_argument("--project-dir", required=True, type=str,
@@ -988,6 +1116,15 @@ def main():
                               "are exhausted does the item get marked blocked and reverted.")
     parser.add_argument("--sleep-between", default=DEFAULT_SLEEP_BETWEEN_ITEMS, type=int,
                          help="Seconds to pause between items (Ctrl+C window)")
+    parser.add_argument("--stop-on-problem", action="store_true",
+                         help="Stop the run at the first item that doesn't pass, the way the "
+                              "loop behaved before per-item worktrees. Now off by default: a "
+                              "failed item is never applied to the project, so the next item "
+                              "cannot build on top of it and there is nothing to stop for.")
+    parser.add_argument("--keep-branches", action="store_true",
+                         help="Keep the per-item branch even for items that passed and merged "
+                              "(a failed item's branch is always kept - it's the only copy of "
+                              "what the model produced).")
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir).expanduser().resolve()
@@ -1006,11 +1143,25 @@ def main():
         log("Warning: no .aider.conf.yml found in project dir - aider will use "
             "its own defaults, which may not be your local Qwen setup.", log_path)
 
-    use_git = is_git_repo(project_dir)
-    if not use_git:
-        log("Warning: project dir is not a git repo - blocked items won't be "
-            "auto-reverted, so a broken/partial change from a failed item may "
-            "be left in place for the next item to build on.", log_path)
+    # Now a hard requirement rather than a warning: every item runs in a
+    # `git worktree` branched from HEAD, which is also the only thing
+    # keeping a failed item away from the project checkout. Without git
+    # there is no isolation to degrade to -- the old non-git path ran items
+    # directly in the tree and left broken changes in place for the next
+    # item to build on, which is exactly what this replaced.
+    if not is_git_repo(project_dir):
+        print(f"{project_dir} is not a git repo; per-item worktrees need one.")
+        sys.exit(1)
+
+    # The checklist and the loop's own log are excused - see is_clean().
+    clean, dirty = wt.is_clean(project_dir, exempt=(args.todo_file, "aider_loop.log"))
+    if not clean:
+        print("The project checkout has uncommitted changes to tracked files:\n"
+              f"{dirty}\n\n"
+              "A passing item is merged with `git merge --ff-only`, which refuses to run "
+              "over local modifications. Commit or stash first - finding this out after an "
+              "item has already spent half an hour in the model is the wrong time.")
+        sys.exit(1)
 
     if not (project_dir / CONFIG_FILENAME).is_file():
         log(f"Note: no {CONFIG_FILENAME} in project dir - using built-in defaults. "
@@ -1019,9 +1170,13 @@ def main():
 
     preflight_repo_size(project_dir, log_path)
 
-    log(f"Starting aider_loop on {project_dir}", log_path)
+    runs_dir = (Path.home() / ".cache" / "aider-loop" / project_dir.name / "runs"
+                / datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+
+    log(f"Starting aider_loop on {project_dir} (run log: {runs_dir})", log_path)
 
     items_processed = 0
+    parked: list[dict] = []
 
     while True:
         if args.max_items is not None and items_processed >= args.max_items:
@@ -1035,156 +1190,40 @@ def main():
             log("No open items remain in todo.md. Done.", log_path)
             break
 
-        log(f"=== Item: {item.text} ===", log_path)
+        index = items_processed + 1
+        log(f"=== Item {index}: {item.text} ===", log_path)
 
-        pre_hash = git_head(project_dir) if use_git else None
+        status, record = process_item(project_dir, item, index, args, log_path)
 
-        success = False
-        attempt = 0
-        aider_output = ""
-        while attempt <= args.max_retries and not success:
-            attempt += 1
-            if attempt > 1:
-                log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
-            success, aider_output = run_aider_on_item(project_dir, item.text, log_path)
-
-        if not success:
-            log(f"Aider failed after {attempt} attempt(s), marking blocked: {item.text}", log_path)
-            item.status = STATUS_BLOCKED
-            if use_git and pre_hash:
-                git_revert_to(project_dir, pre_hash, log_path)
-            write_todo(todo_path, raw_lines, items)
-            items_processed += 1
-            time.sleep(args.sleep_between)
-            continue
-
-        # Cheap, free, deterministic sanity check before spending time on a
-        # build: did aider actually touch the file(s) this task named? This
-        # alone would have caught most of the "marked done but nothing (or
-        # the wrong thing) actually happened" failures seen in practice -
-        # no model call needed.
-        stop_run = False
-        touched: list[str] = []
-        if use_git and pre_hash:
-            expected = expected_files(item.text)
-            restore_unnamed_files(project_dir, pre_hash, expected, log_path)
-            touched = changed_files(project_dir, pre_hash)
-            missing = [f for f in expected if not path_matches_any(f, touched)]
-
-            # Checked first and most trusted: when the task spelled out a
-            # file's exact target content, this is a direct byte-for-byte
-            # comparison, not an inference from "was something touched" the
-            # way every other check here is. Catches exactly the corruption
-            # class that slipped past those (see PROMPT_LEAKAGE_MARKERS'
-            # comment) with no heuristic and no false-positive risk.
-            specs = extract_exact_content_specs(item.text)
-            mismatched = content_mismatches(project_dir, specs)
-            if mismatched:
-                log(f"Content doesn't match the task's exact spec for {mismatched} (checked "
-                    f"byte-for-byte against the spec, not inferred). Marking blocked and "
-                    f"reverting: {item.text}", log_path)
-                item.status = STATUS_BLOCKED
-                git_revert_to(project_dir, pre_hash, log_path)
-                write_todo(todo_path, raw_lines, items)
-                items_processed += 1
-                stop_run = True
-            elif expected and missing:
-                log(f"Expected file(s) not touched: {missing} (aider touched: {touched or 'nothing'}). "
-                    f"Marking needs-review: {item.text}", log_path)
-                item.status = STATUS_NEEDS_REVIEW
-                write_todo(todo_path, raw_lines, items)
-                items_processed += 1
-                stop_run = True
-            else:
-                # The file(s) being touched at all doesn't mean what was
-                # written into them is real - see PROMPT_LEAKAGE_MARKERS'
-                # comment. High-confidence enough (an exact, known-bad
-                # string, not a heuristic) to treat like aider itself
-                # failing: revert and block, rather than the softer
-                # leave-it-for-review treatment above.
-                corrupted = detect_prompt_leakage(project_dir, touched)
-                if corrupted:
-                    log(f"Prompt-leakage marker found in {corrupted} - aider wrote its own "
-                        f"instructions into the file instead of real content. Marking blocked "
-                        f"and reverting: {item.text}", log_path)
-                    item.status = STATUS_BLOCKED
-                    git_revert_to(project_dir, pre_hash, log_path)
-                    write_todo(todo_path, raw_lines, items)
-                    items_processed += 1
-                    stop_run = True
-                else:
-                    suspicious = suspicious_new_paths(touched)
-                    if suspicious:
-                        log(f"Garbage-looking filename(s) created: {suspicious} - aider likely "
-                            f"turned a failed SEARCH/REPLACE match into a new file named after "
-                            f"its own reasoning text. Marking blocked and reverting: {item.text}",
-                            log_path)
-                        item.status = STATUS_BLOCKED
-                        git_revert_to(project_dir, pre_hash, log_path)
-                        write_todo(todo_path, raw_lines, items)
-                        items_processed += 1
-                        stop_run = True
-
-        if stop_run:
-            log("Stopping run at a needs-review item rather than continuing on top of it.", log_path)
-            break
-
-        # Scoped to the files this item actually changed. Outside a git repo
-        # there is no changed set, so scope is None and the checkers fall back
-        # to walking the tree -- the old behaviour, kept only where nothing
-        # better is available.
-        scope = [project_dir / f for f in touched] if use_git and pre_hash else None
-        valid, validation_msg = validate_syntax(project_dir, log_path, scope)
-
-        # Validation-failure retry-with-feedback: unlike the crash-retry loop
-        # above (args.max_retries), this fires when aider ran fine but what
-        # it produced doesn't pass validation. Re-invokes aider with the
-        # original task PLUS the actual failure output, giving it something
-        # concrete to fix, rather than giving up on the first failure.
-        validation_attempt = 0
-        while not valid and validation_attempt < args.max_validation_retries:
-            validation_attempt += 1
-            log(f"Validation failed (retry {validation_attempt}/{args.max_validation_retries}), "
-                f"asking aider to fix it: {item.text}", log_path)
-            fix_prompt = (
-                f"The previous change for this task did not pass validation.\n\n"
-                f"Original task:\n{item.text}\n\n"
-                f"Validation failure output:\n{validation_msg}\n\n"
-                f"Fix the failure above while still completing the original task. "
-                f"Do not revert or abandon the original change; correct it."
-            )
-            fix_success, _ = run_aider_on_item(project_dir, fix_prompt, log_path)
-            if not fix_success:
-                log(f"Aider itself failed during the validation-fix retry for: {item.text}", log_path)
-                break
-            # Recompute: the fix attempt may have touched files the first
-            # attempt didn't.
-            if use_git and pre_hash:
-                restore_unnamed_files(project_dir, pre_hash, expected, log_path)
-                touched = changed_files(project_dir, pre_hash)
-                scope = [project_dir / f for f in touched]
-            valid, validation_msg = validate_syntax(project_dir, log_path, scope)
-
-        if not valid:
-            log(f"Validation failed, marking blocked: {item.text}", log_path)
-            item.status = STATUS_BLOCKED
-            if use_git and pre_hash:
-                git_revert_to(project_dir, pre_hash, log_path)
-            write_todo(todo_path, raw_lines, items)
-            items_processed += 1
-            log(f"=== Finished item ({items_processed} total this run) ===\n", log_path)
-            time.sleep(args.sleep_between)
-            continue
-
-        log(f"Marking done: {item.text}", log_path)
-        item.status = STATUS_DONE
+        item.status = status
         write_todo(todo_path, raw_lines, items)
+        record_path = record_run(runs_dir, index, record)
         items_processed += 1
+
+        if status != STATUS_DONE:
+            parked.append(record)
+            log(f"Parked [{status}] on branch {record['branch']}: {record['reason']}. "
+                f"The project checkout is untouched; details in {record_path}.", log_path)
+            if args.stop_on_problem:
+                log("Stopping at the first problem (--stop-on-problem).", log_path)
+                break
 
         log(f"=== Finished item ({items_processed} total this run) ===\n", log_path)
         time.sleep(args.sleep_between)
+        continue
 
     log(f"Run complete. {items_processed} item(s) processed. See {todo_path} for status.", log_path)
+    if parked:
+        # The point of parking rather than reverting: the work still
+        # exists. Name the branches here so the run ends with something
+        # actionable rather than a count.
+        log(f"{len(parked)} item(s) did not pass and were never applied to the project. "
+            f"Each one's work is on its own branch:", log_path)
+        for r in parked:
+            log(f"  [{r['status']}] {r['branch']} - {r['reason']}\n"
+                f"      {r['item'].splitlines()[0][:110]}", log_path)
+        log(f"Review with: git log -p {parked[0]['branch']}   "
+            f"(and `git branch -D` once you're done with it)", log_path)
 
 
 if __name__ == "__main__":
