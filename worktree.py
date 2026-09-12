@@ -190,16 +190,31 @@ def create(project_dir: Path, index: int, base: str) -> tuple[Path, str]:
 
 
 def merge_ff(project_dir: Path, branch: str) -> tuple[bool, str]:
-    """Fast-forward the project's checked-out branch onto a passing item.
+    """Merge a passing item's branch into the project's checked-out branch.
 
-    ff-only on purpose. Items are branched from the checkout's current
-    HEAD and merged back one at a time, so a fast-forward is always
-    possible in the intended flow; if it isn't, something moved the branch
-    underneath the run and a merge commit would be the wrong way to find
-    that out.
+    Tries `--ff-only` first: in the sequential run this is one item at a
+    time from a base that hasn't moved, so a fast-forward is always
+    possible, and it keeps history linear when it is.
+
+    Falls back to a real merge (`--no-ff`) only when the fast-forward
+    fails. That's expected and normal with `--parallel` items dispatched
+    concurrently: two items can both branch from the same base, and
+    whichever finishes second is no longer a fast-forward once the first
+    one lands - not because anything conflicts, just because the tip
+    moved. A real merge still succeeds cleanly whenever the two items
+    touched different files, which is the checklist's own convention
+    ("keep items to one file where you can" - see README). A genuine
+    conflict still fails and aborts cleanly, same as before; nothing here
+    resolves one automatically.
     """
     result = _git(["merge", "--ff-only", branch], project_dir)
-    return result.returncode == 0, (result.stdout + result.stderr).strip()
+    if result.returncode == 0:
+        return True, (result.stdout + result.stderr).strip()
+    merge_result = _git(["merge", "--no-ff", branch, "-m", f"aider-loop: merge {branch}"], project_dir)
+    if merge_result.returncode == 0:
+        return True, (merge_result.stdout + merge_result.stderr).strip()
+    _git(["merge", "--abort"], project_dir)
+    return False, (merge_result.stdout + merge_result.stderr).strip()
 
 
 def restore_todo(worktree: Path, base: str, todo_name: str) -> bool:

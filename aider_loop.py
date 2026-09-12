@@ -50,6 +50,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
@@ -234,13 +236,22 @@ def next_open_item(items: list[TodoItem]) -> TodoItem | None:
     return None
 
 
+# Guards log()'s own write, nothing else. With --parallel, multiple worker
+# threads can log at the same moment; without this a long line from one
+# thread and a long line from another can interleave mid-write. The lock
+# doesn't order OUTPUT (that's fine, timestamps do that) - it just keeps
+# each single write atomic so lines never merge into garbage.
+_log_lock = threading.Lock()
+
+
 def log(msg: str, log_path: Path | None = None) -> None:
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
-    print(line, flush=True)
-    if log_path:
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+    with _log_lock:
+        print(line, flush=True)
+        if log_path:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
 
 def check_ollama_context(log_path: Path, model_name: str | None = None) -> None:
@@ -265,19 +276,28 @@ def check_ollama_context(log_path: Path, model_name: str | None = None) -> None:
 
 
 def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path,
-                      files: list[str] | None = None) -> tuple[bool, str]:
+                      files: list[str] | None = None, model: str | None = None) -> tuple[bool, str]:
     """
     Runs Aider once in architect mode with a message instructing it to plan
     and implement the given todo item (or, when called from the validation
     retry loop, a follow-up fix prompt - see main()). Aider picks up model/
-    editor-model/architect settings from .aider.conf.yml in project_dir, so
-    we don't override them here - this keeps the script config-agnostic.
+    editor-model/architect settings from .aider.conf.yml in project_dir by
+    default, so a project with a single worker still doesn't need this
+    script to know its model name at all.
+
+    `model` overrides that, on the CLI (which takes precedence over the
+    conf file) rather than by touching .aider.conf.yml - needed for
+    --parallel, where each concurrent worker is deliberately a different
+    ollama model (see run_parallel()'s docstring for why: two workers
+    sharing one model would just queue behind each other's GPU time
+    unless ollama's own concurrency is configured, which this script
+    doesn't assume).
 
     Returns (success, output) where success reflects whether the aider
     process exited cleanly (not whether the change is correct - that's the
     validation step's job).
     """
-    check_ollama_context(log_path)
+    check_ollama_context(log_path, model_name=model)
 
     prompt = (
         f"Work on this task from todo.md:\n\n{item_text}\n\n"
@@ -302,6 +322,11 @@ def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path,
         # before a file block, so aider applied nothing -- and a whole-file
         # edit costs two copies of the file out of the context window.
         "--edit-format", cfg("model", "edit_format", default="diff"),
+        # Overrides .aider.conf.yml's model: key when given - see the
+        # docstring above. aider takes the last --model wins, and CLI
+        # flags win over the conf file regardless of order, so this is
+        # safe to always include when `model` is set.
+        *(["--model", f"ollama/{model}"] if model else []),
         # The files the item named, handed over as editable up front.
         # Without this, aider opens with "which files should I add?" and a
         # thinking model answers it in prose -- measured on a real run:
@@ -1054,7 +1079,8 @@ def classify_tdd_files(files: list[str]) -> tuple[str, str] | None:
 
 def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
                    test_file: str, impl_file: str, base: str, args, log_path: Path,
-                   record: dict, finish) -> tuple[str, dict]:
+                   record: dict, finish, model: str | None = None,
+                   git_lock: threading.RLock | None = None) -> tuple[str, dict]:
     """Red, then green: aider writes ONLY the test and that test is
     confirmed to fail for a real reason, then a separate aider call
     implements the feature without being allowed to touch the test again.
@@ -1065,6 +1091,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
     trusted to grade anything, the same way a human reviewer would want
     to see a new test fail before believing it tests the right thing.
     """
+    git_lock = git_lock or threading.RLock()
     record["tdd"] = {"test_file": test_file, "impl_file": impl_file}
 
     # ---------------------------------------------------------------- RED
@@ -1075,7 +1102,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"fail. Do not write a stub or placeholder implementation anywhere to "
         f"make it pass; that defeats the point of writing the test first.\n\n{task_text}"
     )
-    success, _ = run_aider_on_item(worktree_path, red_prompt, log_path, files=[test_file])
+    success, _ = run_aider_on_item(worktree_path, red_prompt, log_path, files=[test_file], model=model)
     if not success:
         return finish(STATUS_BLOCKED, "TDD red phase: aider itself failed")
 
@@ -1132,7 +1159,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"isn't implemented yet. Implement `{impl_file}` so that test passes.\n\n{task_text}"
     )
     success, _ = run_aider_on_item(worktree_path, green_prompt, log_path,
-                                   files=[impl_file, test_file])
+                                   files=[impl_file, test_file], model=model)
     if not success:
         return finish(STATUS_BLOCKED, "TDD green phase: aider itself failed")
 
@@ -1185,7 +1212,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
             f"Failure output:\n{validation_msg}\n\n"
             f"Fix `{impl_file}` so the test passes. Do not modify `{test_file}` "
             f"or touch any other file."
-        ), log_path, files=[impl_file, test_file])
+        ), log_path, files=[impl_file, test_file], model=model)
         if not fix_success:
             break
         if test_file_modified_since_red():
@@ -1206,23 +1233,35 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         record["validation_output"] = validation_msg[-4000:]
         return finish(STATUS_BLOCKED, "TDD green phase: validation failed")
 
-    merged, merge_output = wt.merge_ff(project_dir, record["branch"])
-    if not merged:
-        return finish(STATUS_NEEDS_REVIEW, f"passed checks but merge failed: {merge_output}")
+    with git_lock:
+        merged, merge_output = wt.merge_ff(project_dir, record["branch"])
+        if not merged:
+            return finish(STATUS_NEEDS_REVIEW, f"passed checks but merge failed: {merge_output}")
 
-    log(f"TDD item merged (test failed red, passed green): {task_text}", log_path)
-    return finish(STATUS_DONE, "TDD: test failed before implementation, passed after")
+        log(f"TDD item merged (test failed red, passed green): {task_text}", log_path)
+        return finish(STATUS_DONE, "TDD: test failed before implementation, passed after")
 
 
 def process_item(project_dir: Path, item: "TodoItem", index: int,
-                 args, log_path: Path) -> tuple[str, dict]:
+                 args, log_path: Path, model: str | None = None,
+                 git_lock: threading.RLock | None = None) -> tuple[str, dict]:
     """Run one item in its own worktree. Returns (status, record).
 
     The project checkout is only ever written to by the final
     fast-forward, and only for an item that passed every check. A failure
     is not reverted, because it was never applied -- it stays on its own
     branch and the caller moves to the next item from the same base.
+
+    `model` overrides the aider model for this item (see
+    run_aider_on_item) - used by --parallel to give each concurrent
+    worker a different one. `git_lock` serializes the operations that
+    touch project_dir's own git state (creating the worktree, merging,
+    removing it) so concurrent workers can't race on it; every other
+    step here (aider itself, every check) touches only this item's own
+    worktree and needs no lock at all. Sequential runs still pass a real
+    lock - just one nothing else ever contends for.
     """
+    git_lock = git_lock or threading.RLock()
     base = git_head(project_dir)
     record: dict = {
         "index": index,
@@ -1231,7 +1270,8 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         "started": datetime.datetime.now().isoformat(timespec="seconds"),
     }
 
-    worktree_path, branch = wt.create(project_dir, index, base)
+    with git_lock:
+        worktree_path, branch = wt.create(project_dir, index, base)
     record["branch"] = branch
     actions = wt.materialize(project_dir, worktree_path)
     log(f"Worktree {worktree_path} on {branch}"
@@ -1242,8 +1282,9 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         record["reason"] = reason
         record["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
         # A parked item's branch is the only copy of what the model wrote.
-        wt.remove(project_dir, worktree_path, branch,
-                  keep_branch=(status != STATUS_DONE) or args.keep_branches)
+        with git_lock:
+            wt.remove(project_dir, worktree_path, branch,
+                      keep_branch=(status != STATUS_DONE) or args.keep_branches)
         return status, record
 
     # Parsed before the run, not after: these are both what aider is handed
@@ -1263,7 +1304,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         test_file, impl_file = classification
         task_text = TDD_PREFIX_RE.sub("", item.text, count=1)
         return run_tdd_phases(project_dir, worktree_path, task_text, test_file, impl_file,
-                              base, args, log_path, record, finish)
+                              base, args, log_path, record, finish, model=model, git_lock=git_lock)
 
     success = False
     attempt = 0
@@ -1271,7 +1312,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         attempt += 1
         if attempt > 1:
             log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
-        success, _ = run_aider_on_item(worktree_path, item.text, log_path, files=expected)
+        success, _ = run_aider_on_item(worktree_path, item.text, log_path, files=expected, model=model)
     record["aider_attempts"] = attempt
 
     if not success:
@@ -1335,7 +1376,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
             f"Validation failure output:\n{validation_msg}\n\n"
             f"Fix the failure above while still completing the original task. "
             f"Do not revert or abandon the original change; correct it."
-        ), log_path, files=expected)
+        ), log_path, files=expected, model=model)
         if not fix_success:
             log(f"Aider itself failed during the validation-fix retry for: {item.text}", log_path)
             break
@@ -1369,14 +1410,151 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         log(f"Item changed nothing at all. Parking needs-review: {item.text}", log_path)
         return finish(STATUS_NEEDS_REVIEW, "the item produced no changes")
 
-    merged, merge_output = wt.merge_ff(project_dir, branch)
-    if not merged:
-        log(f"Item passed but could not fast-forward the project: {merge_output}", log_path)
-        return finish(STATUS_NEEDS_REVIEW, f"passed checks but merge failed: {merge_output}")
+    # Locked from the merge attempt through finish()'s own cleanup: with
+    # --parallel, another item's merge landing in between "we merged" and
+    # "we recorded the resulting HEAD" would make record["merged"] wrong,
+    # and two threads calling wt.merge_ff concurrently is a real git race
+    # on project_dir's shared ref state, not just a bookkeeping one.
+    with git_lock:
+        merged, merge_output = wt.merge_ff(project_dir, branch)
+        if not merged:
+            log(f"Item passed but could not fast-forward the project: {merge_output}", log_path)
+            return finish(STATUS_NEEDS_REVIEW, f"passed checks but merge failed: {merge_output}")
 
-    log(f"Merged {branch} and marking done: {item.text}", log_path)
-    record["merged"] = git_head(project_dir)
-    return finish(STATUS_DONE, "passed every check and was merged")
+        log(f"Merged {branch} and marking done: {item.text}", log_path)
+        record["merged"] = git_head(project_dir)
+        return finish(STATUS_DONE, "passed every check and was merged")
+
+
+def resolve_models(args) -> list[str]:
+    """Which model(s) to run with, overriding .aider.conf.yml's model: key.
+
+    `--models` on the CLI wins; otherwise `[worker] models` in
+    .aiderloop.toml; otherwise none at all, meaning "don't override
+    anything" - the default, and the only path that existed before this
+    override was added. One name changes only which model is used;
+    concurrency is driven purely by how MANY names there are (see
+    run_parallel), so there is no separate --parallel flag to keep in
+    sync with the model list's length.
+    """
+    if args.models:
+        return [m.strip() for m in args.models.split(",") if m.strip()]
+    configured = cfg("worker", "models", default=None)
+    return list(configured) if configured else []
+
+
+def update_item_status(todo_path: Path, item: "TodoItem", status: str) -> None:
+    """Writes one item's status into todo.md, re-reading the file fresh
+    first so a concurrent worker's own status write to a DIFFERENT line
+    isn't clobbered by a write built from a now-stale copy of the file.
+
+    Safe to reuse `item.line_index` against this fresh read because line
+    positions are stable across the run: parse_todo() never reorders or
+    removes lines, and every status write only ever overwrites its own
+    item's single line in place - so the line at that index in a freshly
+    re-read file is still this same item, whatever else changed
+    elsewhere in the meantime.
+    """
+    raw_lines, _ = parse_todo(todo_path)
+    item.status = status
+    raw_lines[item.line_index] = item.render()
+    todo_path.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+
+
+def log_run_summary(items_processed: int, parked: list[dict], todo_path: Path, log_path: Path) -> None:
+    log(f"Run complete. {items_processed} item(s) processed. See {todo_path} for status.", log_path)
+    if parked:
+        # The point of parking rather than reverting: the work still
+        # exists. Name the branches here so the run ends with something
+        # actionable rather than a count.
+        log(f"{len(parked)} item(s) did not pass and were never applied to the project. "
+            f"Each one's work is on its own branch:", log_path)
+        for r in parked:
+            log(f"  [{r['status']}] {r['branch']} - {r['reason']}\n"
+                f"      {r['item'].splitlines()[0][:110]}", log_path)
+        log(f"Review with: git log -p {parked[0]['branch']}   "
+            f"(and `git branch -D` once you're done with it), or run review_server.py.", log_path)
+
+
+def run_parallel(project_dir: Path, todo_path: Path, args, log_path: Path,
+                 models: list[str], runs_dir: Path) -> tuple[int, list[dict]]:
+    """Runs open items concurrently, one worker per model in `models`.
+
+    Each worker is deliberately a DIFFERENT ollama model, not N copies of
+    the same one. This script never raises OLLAMA_NUM_PARALLEL or assumes
+    any particular ollama concurrency configuration - two workers sharing
+    one model would just take turns on the GPU behind ollama's own
+    default of one generation at a time, with none of the wall-clock
+    benefit and all of the added complexity here. Verified directly on
+    real hardware: two different models (a 14B and a 7B coder) loaded and
+    generated concurrently on one 24GB GPU with real headroom left over
+    (~21.8GB used, both at 100% GPU, both producing real output).
+
+    One `git_lock` (RLock) serializes every operation that touches
+    project_dir's own shared git state - creating a worktree, merging one
+    in, removing it - across every worker. Nothing else needs it: aider
+    itself and every check run entirely inside that item's own worktree,
+    fully isolated from every other item in flight. See merge_ff()'s
+    docstring for the other half of what parallel dispatch needs from
+    git: a fast-forward is no longer guaranteed (two items can branch
+    from the same base and only one can still be "the tip" once the
+    first lands), so a real merge is the fallback, not an error.
+
+    Item selection is claim-and-scan under the same lock: re-read the
+    checklist fresh, take the first STATUS_OPEN item not already claimed
+    this run, mark it claimed, release the lock, then do the actual work
+    unlocked. Re-reading fresh each time (rather than working from one
+    stale snapshot) is what lets a worker notice items another worker has
+    already finished; the in-memory `claimed` set is what stops two
+    workers claiming the same still-open item in the gap before either of
+    them has written a status back.
+    """
+    git_lock = threading.RLock()
+    parked_lock = threading.Lock()
+    claimed: set[int] = set()
+    counter = {"n": 0}
+    parked: list[dict] = []
+
+    def claim_next():
+        with git_lock:
+            if args.max_items is not None and counter["n"] >= args.max_items:
+                return None, None
+            _, items = parse_todo(todo_path)
+            for i, item in enumerate(items):
+                if item.status == STATUS_OPEN and i not in claimed:
+                    claimed.add(i)
+                    counter["n"] += 1
+                    return counter["n"], item
+            return None, None
+
+    def worker(slot: int, model: str):
+        while True:
+            index, item = claim_next()
+            if item is None:
+                return
+            tag = f"worker {slot}:{model}"
+            log(f"[{tag}] === Item {index}: {item.text.splitlines()[0][:100]} ===", log_path)
+            status, record = process_item(project_dir, item, index, args, log_path,
+                                          model=model, git_lock=git_lock)
+            record["worker"] = slot
+            record["model"] = model
+            with git_lock:
+                update_item_status(todo_path, item, status)
+                record_path = record_run(runs_dir, index, record)
+            if status != STATUS_DONE:
+                with parked_lock:
+                    parked.append(record)
+                log(f"[{tag}] Parked [{status}]: {record['reason']}. Details in {record_path}.", log_path)
+            else:
+                log(f"[{tag}] Merged: {item.text.splitlines()[0][:100]}", log_path)
+
+    log(f"Starting {len(models)} worker(s) on {project_dir}: {models} (run log: {runs_dir})", log_path)
+    with ThreadPoolExecutor(max_workers=len(models)) as pool:
+        futures = [pool.submit(worker, i, m) for i, m in enumerate(models)]
+        for f in futures:
+            f.result()  # re-raise a worker's exception instead of swallowing it
+
+    return counter["n"], parked
 
 
 def main():
@@ -1406,6 +1584,12 @@ def main():
                          help="Keep the per-item branch even for items that passed and merged "
                               "(a failed item's branch is always kept - it's the only copy of "
                               "what the model produced).")
+    parser.add_argument("--models", default=None, type=str,
+                         help="Comma-separated ollama model name(s), overriding .aider.conf.yml's "
+                              "model: key. One name runs sequentially as before, just with that "
+                              "model. Two or more run that many items concurrently, one worker per "
+                              "model - see README's parallel-workers section for why each worker "
+                              "is deliberately a DIFFERENT model rather than the same one twice.")
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir).expanduser().resolve()
@@ -1458,6 +1642,19 @@ def main():
 
     runs_dir = wt.runs_root(project_dir) / datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
+    models = resolve_models(args)
+    if len(models) > 1:
+        items_processed, parked = run_parallel(project_dir, todo_path, args, log_path, models, runs_dir)
+        log_run_summary(items_processed, parked, todo_path, log_path)
+        return
+
+    # One name (or none) runs the original sequential path, just with
+    # that model overriding .aider.conf.yml when given. This is the exact
+    # code that existed before --models did - untouched except for
+    # threading that one optional override through, so the default case
+    # (no --models at all) is byte-for-byte the same run it always was.
+    single_model = models[0] if models else None
+
     log(f"Starting aider_loop on {project_dir} (run log: {runs_dir})", log_path)
 
     items_processed = 0
@@ -1478,7 +1675,7 @@ def main():
         index = items_processed + 1
         log(f"=== Item {index}: {item.text} ===", log_path)
 
-        status, record = process_item(project_dir, item, index, args, log_path)
+        status, record = process_item(project_dir, item, index, args, log_path, model=single_model)
 
         item.status = status
         write_todo(todo_path, raw_lines, items)
@@ -1497,18 +1694,7 @@ def main():
         time.sleep(args.sleep_between)
         continue
 
-    log(f"Run complete. {items_processed} item(s) processed. See {todo_path} for status.", log_path)
-    if parked:
-        # The point of parking rather than reverting: the work still
-        # exists. Name the branches here so the run ends with something
-        # actionable rather than a count.
-        log(f"{len(parked)} item(s) did not pass and were never applied to the project. "
-            f"Each one's work is on its own branch:", log_path)
-        for r in parked:
-            log(f"  [{r['status']}] {r['branch']} - {r['reason']}\n"
-                f"      {r['item'].splitlines()[0][:110]}", log_path)
-        log(f"Review with: git log -p {parked[0]['branch']}   "
-            f"(and `git branch -D` once you're done with it)", log_path)
+    log_run_summary(items_processed, parked, todo_path, log_path)
 
 
 if __name__ == "__main__":

@@ -18,3 +18,10 @@ commands = [".venv/bin/pytest tests/test_fast.py -q"]
 [preflight]
 # Warn about files this size or larger that aren't in .aiderignore.
 max_file_bytes = 262144
+
+[worker]
+# Two or more names here runs the loop with that many concurrent workers,
+# one per model, instead of --models on the command line every time. Each
+# name should be a DIFFERENT model -- see README's "Parallel workers"
+# section for why two workers sharing one model gets none of the benefit.
+# models = ["qwen25-coder-aider", "qwen2.5-coder:7b"]

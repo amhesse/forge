@@ -146,6 +146,57 @@ No login, no token: there's nothing reachable here that isn't already a
 `127.0.0.1` only. Stdlib only, like `aider_loop.py` itself — a browser
 tab and a project directory are the only things this needs.
 
+## Parallel workers
+
+    python aider_loop.py --project-dir ~/projects/thing --models qwen25-coder-aider,qwen2.5-coder:7b
+
+One model name changes which model runs (still one item at a time,
+otherwise identical to the default). Two or more run that many items
+*concurrently*, one worker per model — or set `[worker] models = [...]`
+in `.aiderloop.toml` instead of passing it every time.
+
+**Each worker is deliberately a different model, not N copies of the
+same one.** This script never raises Ollama's `OLLAMA_NUM_PARALLEL` or
+assumes any particular concurrency configuration on the Ollama side —
+two workers sharing one model would just take turns on the GPU behind
+Ollama's own default of one generation at a time, with none of the
+wall-clock benefit and all of the added complexity below. Verified
+directly: a 14B and a 7B coder model loaded and generated concurrently on
+one 24GB GPU with real headroom left over (~21.8GB used, both at 100%
+GPU, both producing real, complete output at once).
+
+What changes under the hood, so two workers can safely share one
+checkout:
+
+- **One lock, everywhere it matters.** Every operation that touches the
+  project's own shared git state — creating a worktree, merging one in,
+  removing it — is serialized behind a single lock, held by whichever
+  worker is finishing an item at that moment. Nothing else needs it:
+  aider itself and every check run entirely inside that item's own
+  worktree, fully isolated from whatever else is in flight.
+- **Fast-forward isn't guaranteed anymore, and that's fine.** Two items
+  can branch from the same base and only one can still be "the tip" once
+  the first lands. `merge_ff()` now falls back to a real merge (`--no-ff`)
+  whenever the fast-forward fails, and it still succeeds cleanly whenever
+  the two items touched different files — the checklist's own convention
+  ("keep items to one file where you can") is exactly what makes this the
+  common case, not the exception. A genuine conflict still fails and
+  aborts cleanly; nothing here resolves one automatically, and the losing
+  item parks with its work intact on its own branch, same as any other
+  parked item.
+- **Item selection re-reads the checklist fresh each time**, so a worker
+  always sees what other workers have already finished, and an in-memory
+  set of already-claimed items is what stops two workers claiming the
+  same open one in the gap before either has written a status back.
+
+Verified with a controlled stub covering: two workers genuinely
+overlapping on independent files (both merge, one via fast-forward, the
+next via the `--no-ff` fallback, clean merge graph), and two workers
+genuinely conflicting on the same file (the first merges, the second's
+merge attempt hits a real conflict, aborts cleanly with zero corruption
+to the checkout, and parks — `git status` afterward shows nothing but the
+loop's own bookkeeping).
+
 ## Writing items
 
 The safety net is only as good as what it can infer from the item text, and
