@@ -1833,7 +1833,9 @@ def main():
     if not todo_path.is_file():
         print(f"No {args.todo_file} found in {project_dir}")
         sys.exit(1)
-    if not (project_dir / ".aider.conf.yml").is_file():
+    backend = cfg("model", "backend", default="aider")
+    log(f"Editing backend: {backend}", log_path)
+    if backend != "lite" and not (project_dir / ".aider.conf.yml").is_file():
         log("Warning: no .aider.conf.yml found in project dir - aider will use "
             "its own defaults, which may not be your local Qwen setup.", log_path)
 
