@@ -277,6 +277,33 @@ Worth setting expectations by, not the raw worker count:
   worker's slot of time, and routing only decides which item a model
   *attempts*, not whether it succeeds.
 
+### Measuring it: `forge calibrate`
+
+    forge calibrate --models qwen2.5-coder:14b,qwen2.5-coder:7b --trials 3
+    forge calibrate --report                  # re-print from calibration.jsonl
+    forge calibrate --self-test               # check the bench, no model
+
+Runs every item in `bench/items.toml` alone, once per model per trial,
+against a fresh copy of a small fixture project (`bench/fixture/`). The
+items cover exact specs, small and logic-heavy single-file prose edits, a
+bug fix from a symptom, multi-file changes and a TDD item. After forge
+finishes, a grader the model never sees (`bench/graders/<id>.py`) decides
+whether the work is actually correct. Parked branches get graded too, so
+each trial ends up as one of four outcomes:
+
+- `pass`: merged and correct.
+- `silent_wrong`: merged but wrong. forge's checks missed it, and this is
+  the outcome that makes a model unsafe for a category.
+- `parked_ok`: parked even though the work was correct (the checks were
+  too strict).
+- `parked`: parked and wrong (the safety net worked).
+
+The report lists, per model, the categories with at least an 80% pass
+rate and zero `silent_wrong`. Those are the ones safe to route to that
+tier. Results are appended one trial at a time, so an interrupted run can
+be resumed with the same command. `--self-test` confirms each grader
+fails on the untouched fixture and passes on `bench/reference/<id>/`.
+
 ## Writing items
 
 The safety net is only as good as what it can infer from the item text, and

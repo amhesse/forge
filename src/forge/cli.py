@@ -22,11 +22,12 @@ commands:
   review   Open a local page for reviewing parked branches
            (was: review_server.py)
   eval     Run forge's own regression suite against stub editors
+  calibrate  Measure which item kinds each model handles (strong vs weak tier)
 
 Run `forge <command> --help` for that command's own options.
 """
 
-COMMANDS = {"run": "aider_loop", "draft": "spec_compiler", "review": "review_server", "eval": "eval"}
+COMMANDS = {"run": "aider_loop", "draft": "spec_compiler", "review": "review_server", "eval": "eval", "calibrate": "calibrate"}
 
 
 def main(argv: list[str] | None = None) -> int:
