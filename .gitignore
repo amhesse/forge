@@ -9,3 +9,5 @@ dist/
 __pycache__/
 .venv/
 calibration.jsonl
+calibration-*.jsonl
+calibration.log

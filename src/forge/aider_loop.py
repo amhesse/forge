@@ -128,6 +128,34 @@ STATUS_NEEDS_REVIEW = "?"  # aider produced *something* and it built, but an
 # have had each task's real output deleted.
 FILE_PATH_RE = re.compile(r"`([\w./-]*[\w-]\.[A-Za-z][A-Za-z0-9]{0,7})`")
 
+# Extensions common enough to trust even on a name that looks like code.
+# NOT a whitelist - an unlisted extension is still a file unless the name
+# also has code shape (see _looks_like_code_reference).
+_COMMON_EXTENSIONS = {
+    "py", "js", "jsx", "ts", "tsx", "mjs", "cjs", "json", "md", "txt", "toml", "yaml",
+    "yml", "ini", "cfg", "html", "css", "scss", "sh", "rs", "go", "java", "kt", "c",
+    "h", "cpp", "hpp", "cs", "rb", "php", "lua", "sql", "xml", "csv", "lock", "env",
+}
+
+
+def _looks_like_code_reference(path: str) -> bool:
+    """True for backticked code like `Ledger.add` or `ledger.store.Ledger`,
+    which FILE_PATH_RE also matches. Found by forge calibrate: a rename
+    item was parked on every trial for never "touching" `Ledger.add`, and
+    a TDD item naming `ledger.store.Ledger` was rejected before any model
+    ran for naming three files instead of two.
+
+    Only slash-less names qualify, and only with a code shape: a
+    capitalised stem or extension, or more than one dot. A real file
+    written that way with an uncommon extension would be missed, which is
+    the smaller risk than parking correct work."""
+    if "/" in path:
+        return False
+    stem, _, ext = path.rpartition(".")
+    if ext.lower() in _COMMON_EXTENSIONS and not ext[0].isupper():
+        return False
+    return stem[:1].isupper() or ext[:1].isupper() or "." in stem.lstrip(".")
+
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_VALIDATION_RETRIES = 1  # separate from DEFAULT_MAX_RETRIES: this
 # governs "validation failed, ask aider to fix it" retries, not "aider itself
@@ -902,6 +930,8 @@ def expected_files(item_text: str) -> list[str]:
     for m in FILE_PATH_RE.finditer(prose_only):
         after = prose_only[m.end():m.end() + 120]
         before = prose_only[max(0, m.start() - 120):m.start()]
+        if _looks_like_code_reference(m.group(1)):
+            continue
         if _negates_before(before) or _negates(m.group(1), after):
             continue
         expected.append(m.group(1))
@@ -1051,7 +1081,8 @@ def extract_exact_content_specs(item_text: str) -> dict[str, str]:
             continue
         if "exactly" not in before[-80:].lower():
             continue
-        path_matches = list(FILE_PATH_RE.finditer(item_text[:fence.start()]))
+        path_matches = [m for m in FILE_PATH_RE.finditer(item_text[:fence.start()])
+                        if not _looks_like_code_reference(m.group(1))]
         if not path_matches:
             continue
         specs[path_matches[-1].group(1)] = fence.group(1)
