@@ -67,3 +67,16 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 ```
+
+- [x] Add unit tests in `tests/test_lite_editor.py` for the
+  find_import_context function (it currently has none). Use tmp_path or
+  a similar temp directory as the fake project root, writing small
+  Python files into it directly rather than depending on any other
+  project's fixtures. Cover three cases: (1) a target file whose own
+  import statement resolves to a real file already on disk in the temp
+  project, (2) a target file that does not exist yet, where a resolvable
+  reference only appears in the item text argument (not in any file on
+  disk) - this is the case TDD actually depends on, since both files
+  being written are new, and (3) a reference to something that is not a
+  real file in the temp project (e.g. a stdlib-style name) being
+  silently skipped rather than raising or being included in the result.
