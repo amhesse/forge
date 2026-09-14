@@ -52,6 +52,28 @@ class TestNegationDetection(unittest.TestCase):
         self.assertEqual(al.expected_files(text), ["arch/store.py"])
 
 
+class TestCodeReferencesAreNotFiles(unittest.TestCase):
+    """Backticked code shaped like a filename. Found by forge calibrate:
+    a correct rename parked on every trial, and a TDD item was rejected
+    before any model ran for naming three files."""
+
+    def test_method_names_in_a_rename(self):
+        text = ("Rename the method `Ledger.add` to `Ledger.record` everywhere. Update "
+                "`ledger/store.py`, `ledger/cli.py` and `tests/test_basic.py`.")
+        self.assertEqual(al.expected_files(text),
+                         ["ledger/cli.py", "ledger/store.py", "tests/test_basic.py"])
+
+    def test_dotted_module_path_in_tdd_item(self):
+        text = ("TDD: implement `ledger/budget.py` so `tests/test_budget.py` passes: takes "
+                "a `ledger.store.Ledger`.")
+        self.assertEqual(al.expected_files(text), ["ledger/budget.py", "tests/test_budget.py"])
+        self.assertEqual(al.estimate_difficulty(text), al.DIFFICULTY_HARD)
+
+    def test_real_files_still_count(self):
+        for name in ["README.md", "notes.story", ".aider.conf.yml", "app.test.js", "Main.java"]:
+            self.assertEqual(al.expected_files(f"In `{name}`, do X."), [name], name)
+
+
 class TestDifficultyRouting(unittest.TestCase):
     """estimate_difficulty()'s one grounded signal: a byte-exact item is
     "easy" because it's checked deterministically regardless of which

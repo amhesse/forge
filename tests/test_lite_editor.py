@@ -7,7 +7,9 @@ byte-exact item and one step later as a SyntaxError. These are the
 regression tests for that.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from forge import lite_editor as le
 
@@ -91,6 +93,52 @@ class TestWrappingFenceStripping(unittest.TestCase):
         raw = ("===FILE: r.md===\n# Title\n\n```python\ncode\n```\n\nmore\n===END===")
         self.assertEqual(le.parse_file_blocks(raw),
                         {"r.md": "# Title\n\n```python\ncode\n```\n\nmore"})
+
+
+class TestFindImportContext(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.project_dir = Path(self._tmpdir.name)
+
+    def test_target_files_own_import_resolves_to_an_on_disk_file(self):
+        # Case 1: an existing file's real `import` statement names a
+        # module that is already on disk in the project.
+        (self.project_dir / "ledger.py").write_text(
+            "class Ledger:\n    def add(self):\n        pass\n", encoding="utf-8"
+        )
+        (self.project_dir / "main.py").write_text(
+            "import ledger\n\ndef run():\n    return ledger.Ledger()\n", encoding="utf-8"
+        )
+        context = le.find_import_context(self.project_dir, ["main.py"])
+        self.assertEqual(
+            context,
+            {"ledger.py": "class Ledger:\n    def add(self):\n        pass\n"},
+        )
+
+    def test_new_target_file_resolves_reference_from_item_text_only(self):
+        # Case 2: the actual TDD case - both `files` are new, so there's
+        # no on-disk import to parse yet. The only place the dependency
+        # is named is a backtick-quoted dotted reference in item_text,
+        # but it does resolve to a real file already in the project.
+        (self.project_dir / "ledger.py").write_text(
+            "class Ledger:\n    def add(self, amount):\n        self.cents = amount\n",
+            encoding="utf-8",
+        )
+        item_text = "Write a test for `ledger.Ledger.add` in test_ledger.py."
+        context = le.find_import_context(
+            self.project_dir, ["test_ledger.py"], item_text
+        )
+        self.assertIn("ledger.py", context)
+        self.assertIn("class Ledger", context["ledger.py"])
+
+    def test_reference_to_non_project_file_is_silently_skipped(self):
+        # Case 3: a dotted reference that doesn't name a real file in the
+        # project (e.g. a stdlib-style module) should not raise and
+        # should not show up in the result.
+        item_text = "Use `collections.OrderedDict` to keep insertion order."
+        context = le.find_import_context(self.project_dir, ["new_file.py"], item_text)
+        self.assertEqual(context, {})
 
 
 if __name__ == "__main__":
