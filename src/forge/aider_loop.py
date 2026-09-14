@@ -793,13 +793,25 @@ DEFAULT_MAX_FILE_BYTES = 262144   # 256KB, ~85k tokens of text
 
 
 def preflight_todo_rules(todo_path: Path, log_path: Path) -> None:
-    from forge.spec_compiler import validate_item
+    """Aborts the whole run only over a FATAL shape problem - one where a
+    load-bearing check (touched-files, byte-exact) would actually be
+    disabled, or the item is concretely wrong (a hallucinated anchor).
+    Everything validate_item() flags is still logged, including advisory
+    ones (like naming 3+ files), because they're real signal for a human
+    to read - just not signal that should block a legitimate item from
+    running. See fatal_problems()'s docstring for the run this
+    distinction fixed: a correctly 3-file item (rename_across_files,
+    add_currency_field in bench/) was rejected on every single
+    calibration trial, for both models, before either ever got a chance
+    to run - 0 seconds, every time, not a model failure at all."""
+    from forge.spec_compiler import validate_item, fatal_problems
     _, items = parse_todo(todo_path)
     open_items = [it for it in items if it.status == STATUS_OPEN]
     if not open_items:
         return
-        
+
     any_problems = False
+    any_fatal = False
     for i, item in enumerate(open_items, 1):
         problems = validate_item(item, todo_path.parent)
         if problems:
@@ -809,13 +821,19 @@ def preflight_todo_rules(todo_path: Path, log_path: Path) -> None:
             log(f"Item {i} ({item.text.splitlines()[0][:60]}...):", log_path)
             for p in problems:
                 log(f"  ⚠ {p}", log_path)
-                
-    if any_problems:
-        log("ERROR: One or more open items violate the formatting rules in the README.", log_path)
-        log("The loop relies on these rules (like naming files in backticks) to safely scope edits.", log_path)
+        if fatal_problems(item, todo_path.parent):
+            any_fatal = True
+
+    if any_fatal:
+        log("ERROR: One or more open items violate the formatting rules in the README "
+            "in a way that disables a real check (missing backtick file names, an "
+            "unverified fenced block, or a hallucinated anchor line).", log_path)
+        log("The loop relies on these rules to safely scope edits.", log_path)
         log("Please fix the items in your checklist or remove them before running.", log_path)
         import sys
         sys.exit(1)
+    elif any_problems:
+        log("(the warning(s) above are advisory - the run is proceeding)", log_path)
 
 
 def preflight_repo_size(project_dir: Path, log_path: Path) -> list[str]:
@@ -906,6 +924,17 @@ def git_head(project_dir: Path) -> str | None:
 NEGATION_NEAR_RE = re.compile(
     r"should not be touched|do not touch(?!\s+(?:any\s+)?other)|not be touched|"
     r"should not touch(?!\s+(?:any\s+)?other)|"
+    # "change" is a much more generic verb than "touch" in practice - real
+    # items use "do not change any existing test" as a plain disclaimer
+    # with no specific file in view. A backtick-lookahead here doesn't
+    # work as a fix (tried first, reverted): _negates_before's `before`
+    # slice deliberately stops right BEFORE a path's own backtick, so a
+    # lookahead requiring one immediately after can never match there -
+    # that's the whole call site this exists for. Same exclusion shape as
+    # "touch" instead, widened to the two boilerplate phrasings actually
+    # seen ("any other ..." / "any existing ...").
+    r"do not change(?!\s+(?:any\s+)?(?:other|existing))|"
+    r"should not change(?!\s+(?:any\s+)?(?:other|existing))|"
     r"leave\b.{0,40}\bunchanged|which is unrelated",
     re.IGNORECASE,
 )
