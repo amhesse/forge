@@ -1334,7 +1334,8 @@ def estimate_difficulty(item_text: str) -> str:
 
 def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: list[str],
                     args, log_path: Path, record: dict, finish,
-                    model: str | None = None, backend_override: str | None = None):
+                    model: str | None = None, backend_override: str | None = None,
+                    tdd: bool = False, restore_base: str | None = None):
     """Last gate before merge, after every mechanical check (including
     TDD's red/green check) has passed: a second model reads the diff for
     wrong logic the mechanical checks can't see - the "silent wrong"
@@ -1348,10 +1349,23 @@ def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: li
     from `finish()` if the item should be parked instead - callers must
     check for that and return it directly, the same as any other early
     exit here.
+
+    `restore_base` is the commit a rejected review's fix attempt gets
+    reverted against for any file outside `expected` - defaults to
+    `base` (the diff's own start point), which is right for the normal
+    path but wrong for TDD: `base` is BEFORE the red phase, so the test
+    file doesn't exist there at all, and restoring "to how it was at
+    base" means deleting it outright rather than putting back its
+    red-phase content. Found live: a TDD review-fix that strayed into
+    editing the test file got it deleted, not restored, and the item
+    still parked safely (test_file_modified_since_red caught the
+    resulting mismatch either way) - just more conservatively than
+    necessary. The TDD call site passes the red-phase commit instead.
     """
     reviewer = getattr(args, "review", None)
     if not reviewer:
         return None
+    restore_base = restore_base or base
     review_attempt = 0
     while True:
         diff = subprocess.run(["git", "-C", str(worktree_path), "diff", base, "HEAD"],
@@ -1360,7 +1374,7 @@ def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: li
         if reviewer == "claude":
             approved, feedback = claude_editor.review_diff(
                 worktree_path, item_text, diff, lambda m: log(m, log_path),
-                model=getattr(args, "review_model", None))
+                model=getattr(args, "review_model", None), tdd=tdd)
         else:
             try:
                 out = subprocess.run(["agy", "--print",
@@ -1397,7 +1411,7 @@ def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: li
         _accumulate_usage(record, fix_usage)
         if not fix_success:
             continue
-        restore_unnamed_files(worktree_path, base, expected, log_path)
+        restore_unnamed_files(worktree_path, restore_base, expected, log_path)
         wt.restore_todo(worktree_path, base, args.todo_file)
         touched = changed_files(worktree_path, base)
         record["touched_files"] = touched
@@ -1586,7 +1600,8 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
     # backend the prompt still says so explicitly.
     if (gate_result := run_review_gate(worktree_path, base, task_text, [impl_file],
                                        args, log_path, record, finish, model=model,
-                                       backend_override=backend_override)) is not None:
+                                       backend_override=backend_override, tdd=True,
+                                       restore_base=red_commit)) is not None:
         return gate_result
     if test_file_modified_since_red():
         return finish(STATUS_NEEDS_REVIEW, f"a review-fix retry modified the test file `{test_file}`")
