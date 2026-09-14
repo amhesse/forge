@@ -127,7 +127,7 @@ class TestFindImportContext(unittest.TestCase):
         )
         item_text = "Write a test for `ledger.Ledger.add` in test_ledger.py."
         context = le.find_import_context(
-            self.project_dir, ["test_ledger.py", "ledger.py"], item_text
+            self.project_dir, ["test_ledger.py"], item_text
         )
         self.assertIn("ledger.py", context)
         self.assertIn("class Ledger", context["ledger.py"])
