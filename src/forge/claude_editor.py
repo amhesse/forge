@@ -108,12 +108,36 @@ def run_claude_on_item(worktree: Path, item_text: str, log, files: list[str] | N
 
 
 def review_diff(worktree: Path, item_text: str, diff: str, log,
-                model: str | None = None, timeout: int = 600) -> tuple[bool | None, str]:
-    """Returns (approved, feedback). approved is None if the review itself failed."""
+                model: str | None = None, timeout: int = 600, tdd: bool = False
+                ) -> tuple[bool | None, str]:
+    """Returns (approved, feedback). approved is None if the review itself failed.
+
+    `tdd=True` adds an extra instruction found necessary by a real case,
+    not a hypothetical one: a TDD item can merge a wrong implementation
+    that passes its OWN red-phase test, when that test is narrower than
+    the task it's supposed to verify (measured directly: tdd_budget's
+    self-written test never exercised a category with both income and
+    spending entries, so an implementation that summed both signs passed
+    it while failing the real spec). A generic "is this diff correct"
+    review can miss that, because the diff and its own test agree with
+    each other - the mismatch is between the test and the task, which is
+    exactly what this asks for explicitly instead of leaving implicit."""
     prompt = ("Review this diff against the task it was meant to implement. You may read "
               "files in the repository for context. Look for incorrect logic, missed "
-              "requirements and broken behaviour - not style.\n\n"
-              "Explain your reasoning first if you want, but the VERY LAST LINE of your "
+              "requirements and broken behaviour - not style.\n\n")
+    if tdd:
+        prompt += (
+            "This is a TDD item: one of the changed files is a test the same model wrote "
+            "for itself before implementing the rest. Do not just check that the "
+            "implementation passes ITS OWN test - separately check whether that test's "
+            "assertions actually cover every case the task describes (edge cases, boundary "
+            "values, combinations the task mentions - e.g. mixed positive and negative "
+            "values when the task says both matter, empty/missing input if the task "
+            "specifies behavior for it). A test that is narrower than the task can pass "
+            "against a wrong implementation; reject if the test doesn't prove the task is "
+            "actually satisfied, even if the diff currently passes its own test.\n\n"
+        )
+    prompt += ("Explain your reasoning first if you want, but the VERY LAST LINE of your "
               "reply must be exactly one word, nothing else on that line: APPROVE if it "
               "correctly implements the task, or REJECT if it doesn't.\n\n"
               f"Task:\n{item_text}\n\nDiff:\n{diff}")
