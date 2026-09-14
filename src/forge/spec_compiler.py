@@ -348,20 +348,46 @@ def validate_item(item: al.TodoItem, project_dir: Path) -> list[str]:
     a *good* task, only whether it has the shape the rules above asked
     for and that aider_loop can actually enforce. A missing shape is
     reported, not silently fixed: the human reviewing the draft should
-    see exactly what the model skipped."""
-    problems = []
+    see exactly what the model skipped.
+
+    Returns plain messages, for callers (like `forge draft`) that only
+    ever warn. A caller that needs to tell "a real check is disabled"
+    from "a heuristic nudge" - preflight_todo_rules, which can abort a
+    run over this - should call fatal_problems() instead; see its
+    docstring for why the two are not the same severity."""
+    return [msg for msg, _fatal in _validate_item_typed(item, project_dir)]
+
+
+def fatal_problems(item: al.TodoItem, project_dir: Path) -> list[str]:
+    """The subset of validate_item()'s problems worth aborting a run
+    over: only ones where a load-bearing check (touched-files, or the
+    byte-exact check) is actually disabled, or where the item is
+    concretely wrong (a hallucinated anchor line). Found by calibration:
+    preflight_todo_rules used to treat every validate_item() problem as
+    fatal, which meant a real, correctly 3-file item (rename_across_files,
+    add_currency_field) was rejected before any model ever ran, on every
+    single trial, for both models - the 3-or-more-files check is
+    explicitly worded as "check this isn't just..." (a nudge, not a
+    verdict) and forge draft's own use of the same function already only
+    warns on it; preflight silently held it to a stricter standard than
+    the function's own author did."""
+    return [msg for msg, fatal in _validate_item_typed(item, project_dir) if fatal]
+
+
+def _validate_item_typed(item: al.TodoItem, project_dir: Path) -> list[tuple[str, bool]]:
+    problems: list[tuple[str, bool]] = []
     files = al.expected_files(item.text)
     if not files:
-        problems.append("names no file in backticks - the touched-files check "
-                         "will have nothing to verify")
+        problems.append(("names no file in backticks - the touched-files check "
+                         "will have nothing to verify", True))
     specs = al.extract_exact_content_specs(item.text)
     has_fence = "```" in item.text
     if has_fence and not specs and "exactly" not in item.text.lower():
-        problems.append("has a fenced code block but doesn't say \"exactly\" before it - "
-                         "the byte-exact check won't fire, so this block is unverified prose")
+        problems.append(("has a fenced code block but doesn't say \"exactly\" before it - "
+                         "the byte-exact check won't fire, so this block is unverified prose", True))
     if len(files) > 2:
-        problems.append(f"names {len(files)} files - rule 1 allows two only when they must "
-                         f"agree with each other; check this isn't just an under-scoped item")
+        problems.append((f"names {len(files)} files - rule 1 allows two only when they must "
+                         f"agree with each other; check this isn't just an under-scoped item", False))
 
     # The one check that would have caught this session's own real
     # near-miss: a drafted item claimed an anchor line that does not exist
@@ -389,10 +415,10 @@ def validate_item(item: al.TodoItem, project_dir: Path) -> list[str]:
                 found_in_any = True
                 break
         if not found_in_any and files:
-            problems.append(f"claims an existing line {anchor!r}, but it doesn't appear "
+            problems.append((f"claims an existing line {anchor!r}, but it doesn't appear "
                              f"in {files} as they exist right now - this may be a "
                              f"hallucinated anchor (measured once for real: it produces "
-                             f"a confident, wrong item with no anchor that actually exists)")
+                             f"a confident, wrong item with no anchor that actually exists)", True))
     return problems
 
 
