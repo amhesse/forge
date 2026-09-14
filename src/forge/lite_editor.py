@@ -61,6 +61,7 @@ after; there is no "after" to clean up, because nothing outside the
 agreed file set can ever be considered.
 """
 
+import ast
 import datetime
 import json
 import re
@@ -156,7 +157,130 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
 
 
-def build_prompt(project_dir: Path, item_text: str, files: list[str]) -> str:
+# Bound on how much imported-module context one call carries, in files
+# and in bytes-per-file. This is read-only orientation, not editable
+# scope (see find_import_context's docstring for why it's needed at
+# all) - it should be enough for the model to see a class's real
+# attributes, not enough to dominate the context window or make a
+# rewrite-length item's num_predict budget too tight.
+MAX_IMPORT_CONTEXT_FILES = 4
+MAX_IMPORT_CONTEXT_BYTES = 4000
+
+
+def _resolve_import(project_dir: Path, dotted: str) -> Path | None:
+    """dotted module name -> the project file it names, or None if it
+    isn't one (stdlib, a third-party package, anything not on disk here).
+    Tried against the project root and against `src/`, the two layouts
+    this project's own items and this project itself use."""
+    rel = Path(*dotted.split("."))
+    for root in (project_dir, project_dir / "src"):
+        candidate = root / rel.with_suffix(".py")
+        if candidate.is_file():
+            return candidate
+        candidate = root / rel / "__init__.py"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+# A backtick-quoted dotted path: `ledger.store.Ledger`, `ledger.store.Ledger.add`.
+# Matched even though the trailing segment is usually a class or method
+# name, not a module - _text_dotted_modules() below strips segments from
+# the right until something resolves, so "Ledger" or "Ledger.add" falls
+# away and "ledger.store" (the actual module) is what's tried.
+_DOTTED_REF_RE = re.compile(r"`((?:[A-Za-z_][A-Za-z0-9_]*\.){1,}[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def find_import_context(project_dir: Path, files: list[str], item_text: str = "") -> dict[str, str]:
+    """{path: content} for project files a file in `files` imports, or
+    that the item text names by dotted reference - read-only and
+    separate from the writable `files` set.
+
+    Exists because lite_editor's whole-file-rewrite contract (see the
+    module docstring) only ever shows the model the file(s) it was told
+    to write - it never sees a file a TDD test imports, or a class it
+    calls into. Measured directly: every TDD item failed (0/6 across two
+    models) because the model wrote `entry.amount` for a field that's
+    actually `entry.cents` - it had never been shown the `Entry`
+    dataclass it was writing against, only told it existed by name in the
+    task text.
+
+    Two sources, because one alone misses real cases:
+    - AST-parsing `files`' own imports catches an *existing* file editing
+      into a dependency it already names in code.
+    - Scanning `item_text` for backtick-quoted dotted references (e.g.
+      `ledger.store.Ledger`) is what actually covers TDD: both files
+      being written are new, so there is no on-disk import statement to
+      parse yet - the class name only ever appears in the task's prose.
+
+    Bugfix and multi-file items hit the same gap on the AST side, just
+    less reliably - so both sources run for every call, not only TDD.
+
+    Best-effort and Python-only: a reference or import this can't resolve
+    to an on-disk project file (stdlib, third-party, a plain method name
+    with no matching module, a syntax error in the source being scanned)
+    is silently skipped rather than guessed at - the read-only-context
+    idea only helps if what it shows is real.
+    """
+    context: dict[str, str] = {}
+    seen: set[str] = set()
+
+    def consider(mod: str) -> bool:
+        """Returns True if `mod` names a real project file, whether or
+        not it ended up added (already in `files`/context still counts,
+        so a text reference's shorter fallback prefixes aren't tried
+        once the real module is found)."""
+        if mod in seen:
+            return False
+        seen.add(mod)
+        if len(context) >= MAX_IMPORT_CONTEXT_FILES:
+            return False
+        resolved = _resolve_import(project_dir, mod)
+        if resolved is None:
+            return False
+        rel_path = resolved.relative_to(project_dir).as_posix()
+        if rel_path in files or rel_path in context:
+            return True
+        content = resolved.read_text(encoding="utf-8", errors="replace")
+        context[rel_path] = content[:MAX_IMPORT_CONTEXT_BYTES]
+        return True
+
+    for f in files:
+        p = project_dir / f
+        if p.suffix != ".py" or not p.is_file():
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    consider(alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                if node.level == 0:
+                    consider(node.module)
+                else:
+                    # `from .foo import Bar` etc - resolve relative to
+                    # this file's own package, not the project root.
+                    pkg = Path(f).parent.parts
+                    up = node.level - 1
+                    base = pkg[: len(pkg) - up] if up else pkg
+                    consider(".".join((*base, *node.module.split("."))))
+
+    for ref in _DOTTED_REF_RE.findall(item_text):
+        if len(context) >= MAX_IMPORT_CONTEXT_FILES:
+            break
+        segments = ref.split(".")
+        for i in range(len(segments), 0, -1):
+            if consider(".".join(segments[:i])):
+                break
+
+    return context
+
+
+def build_prompt(project_dir: Path, item_text: str, files: list[str],
+                 context: dict[str, str] | None = None) -> str:
     parts = [SYSTEM_PREAMBLE]
     for f in files:
         p = project_dir / f
@@ -164,6 +288,9 @@ def build_prompt(project_dir: Path, item_text: str, files: list[str]) -> str:
             parts.append(f"### Current content of {f}\n\n{p.read_text(encoding='utf-8', errors='replace')}")
         else:
             parts.append(f"### {f} does not exist yet - you are creating it.")
+    for f, content in (context or {}).items():
+        parts.append(f"### Read-only context: {f} (imported by a file above - "
+                     f"for reference only, do NOT write a FILE: block for it)\n\n{content}")
     parts.append(f"### Task\n\n{item_text}")
     # Always non-empty: run_lite_on_item refuses a call with no named
     # files rather than letting the model choose its own scope, which is
@@ -276,7 +403,10 @@ def run_lite_on_item(project_dir: Path, item_text: str, log_path: Path,
              "(unlike aider, it has no .aider.conf.yml to fall back to)", log_path)
         return False, "lite_editor requires an explicit model"
 
-    prompt = build_prompt(project_dir, item_text, files)
+    context = find_import_context(project_dir, files, item_text=item_text)
+    prompt = build_prompt(project_dir, item_text, files, context=context)
+    if context:
+        _log(f"[lite_editor] read-only context from imports: {list(context)}", log_path)
     _log(f"[lite_editor] requesting {files} from {model}", log_path)
     raw = call_ollama(model, prompt, ollama_url, num_ctx, num_predict, timeout, log_path)
     if not raw.strip():
