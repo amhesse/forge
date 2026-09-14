@@ -473,6 +473,34 @@ costs context twice, once read and once rewritten. Keep items to one
 file, and prefer `lite` on projects whose files are small enough to
 rewrite comfortably.
 
+## Escalating to Claude: `--fallback-backend claude` and `--review claude`
+
+The local model is the workhorse (`qwen3-coder:30b` here). Claude is
+an escalation path, run through the Claude Code CLI (`claude -p`):
+
+    forge run --project-dir ~/projects/thing --todo-file TODO.md \
+        --models qwen3-coder:30b --backend lite \
+        --review claude --review-model sonnet \
+        --fallback-backend claude --fallback-model opus
+
+- `--review claude` is the last check before a merge. It runs after every
+  mechanical check has passed, and Claude reads the diff against the item
+  looking for wrong logic. That is the silent-wrong class `forge calibrate`
+  counts, and none of the other checks can see it. A rejection goes back
+  to the same editor as feedback, for up to `--max-validation-retries`
+  rounds. If the review can't run at all, the item is parked as
+  needs-review rather than merged unreviewed.
+- `--fallback-backend claude` hands a parked item to Claude in a fresh
+  worktree, which gets its own branch (`...-retry`). Claude's work goes
+  through exactly the same checks, including scope restore, validate
+  commands and the review. `--fallback-model` is optional here.
+
+No API bill: `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are removed
+from the child environment, so `claude -p` always uses the logged-in
+subscription. It still counts against the plan's usage limits. Claude
+gets only Read/Edit/Write/Glob/Grep (Read/Glob/Grep when reviewing) and
+no shell, because forge runs the project's validate commands itself.
+
 ## Token usage, not cost
 
 Every run ends with a line like:

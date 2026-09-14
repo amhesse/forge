@@ -7,11 +7,13 @@
 
 [model]
 backend = "lite"
-author = "qwen25-coder-aider"
+author = "qwen3-coder:30b"
 
 [validate]
 checks = ["python"]
 commands = ["PYTHONPATH=src python3 -m unittest discover -s tests -q"]
 
 [worker]
-models = ["qwen25-coder-aider", "qwen2.5-coder:7b"]
+# One worker: calibration showed the 7B adds speed, never accuracy, and
+# the 30B leaves no VRAM on a 24GB card for a second model anyway.
+models = ["qwen3-coder:30b"]

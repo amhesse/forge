@@ -179,6 +179,10 @@ def branch_name(index: int) -> str:
 def create(project_dir: Path, index: int, base: str) -> tuple[Path, str]:
     """Add a worktree for one item, branched from `base`. Returns (path, branch)."""
     branch = branch_name(index)
+    # A fallback retry of the same item can start within the same second
+    # as the parked first attempt, whose branch is kept.
+    if _git(["rev-parse", "--verify", "--quiet", branch], project_dir).returncode == 0:
+        branch += "-retry"
     path = worktrees_root(project_dir) / branch.rsplit("/", 1)[-1]
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():

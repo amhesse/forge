@@ -97,6 +97,7 @@ DEFAULT_NUM_PREDICT = 8000  # a rewritten file plus reasoning; bounded for
                              # that and never reach a single ===FILE===
                              # block. Capped, not silently allowed to run.
 DEFAULT_TIMEOUT = 600
+VERBOSE = False
 
 # A block's content ends at whichever comes first: a real ===END===, the
 # start of the NEXT ===FILE:=== block (matched via lookahead, so it stays
@@ -193,7 +194,8 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
                 obj = json.loads(line)
                 piece = obj.get("response", "")
                 chunks.append(piece)
-                print(piece, end="", flush=True)
+                if VERBOSE:
+                    print(piece, end="", flush=True)
                 if obj.get("done"):
                     if obj.get("done_reason") == "length":
                         _log(f"[lite_editor] hit num_predict={num_predict} - output may be truncated", log_path)

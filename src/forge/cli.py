@@ -1,6 +1,6 @@
-"""The `forge` command: one entry point, four subcommands.
+"""The `forge` command: one entry point, five subcommands.
 
-Deliberately thin - it does not touch argparse in any of the four
+Deliberately thin - it does not touch argparse in any of the five
 modules below, which each already parse `sys.argv` themselves (that's
 what let this file exist without risking a single line of change to
 code that has already survived real bugs this session). It just picks

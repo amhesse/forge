@@ -273,7 +273,9 @@ def main():
         sys.exit(1)
 
     Handler.project_dir = project_dir
-    server = HTTPServer(("127.0.0.1", args.port), Handler)
+    class ReusableHTTPServer(HTTPServer):
+        allow_reuse_address = True
+    server = ReusableHTTPServer(("127.0.0.1", args.port), Handler)
     pending = len(list_pending_branches(project_dir))
     print(f"Reviewing {project_dir} - {pending} item(s) pending.")
     print(f"Open http://127.0.0.1:{args.port}/ - Ctrl+C to stop.")

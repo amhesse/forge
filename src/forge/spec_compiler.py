@@ -459,9 +459,7 @@ def main():
               "read the flagged item(s) before running the loop.", file=sys.stderr)
 
     with todo_path.open("a", encoding="utf-8") as f:
-        f.write("\n" + "\n\n".join(item.render() + "\n" +
-                                     "\n".join(item.text.split("\n")[1:])
-                                     for item in items) + "\n")
+        f.write("\n" + "\n\n".join(f"{item.indent}- [{item.status}] {item.text}" for item in items) + "\n")
     print(f"Appended {len(items)} item(s) to {todo_path}", file=sys.stderr)
 
 

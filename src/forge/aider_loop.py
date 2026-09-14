@@ -55,6 +55,7 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
+from . import claude_editor
 from . import lite_editor
 from . import worktree as wt
 
@@ -305,7 +306,7 @@ def check_ollama_context(log_path: Path, model_name: str | None = None) -> None:
 
 
 def run_aider_on_item(project_dir: Path, item_text: str, log_path: Path,
-                      files: list[str] | None = None, model: str | None = None) -> tuple[bool, str]:
+                      files: list[str] | None = None, model: str | None = None, backend_override: str | None = None) -> tuple[bool, str]:
     """
     Runs Aider once in architect mode with a message instructing it to plan
     and implement the given todo item (or, when called from the validation
@@ -443,8 +444,20 @@ def parse_aider_token_line(output: str) -> dict:
     return {"prompt_tokens": int(prompt), "completion_tokens": int(completion), "seconds": 0.0}
 
 
+def _fallback_label(args) -> str:
+    backend = getattr(args, "fallback_backend", "aider")
+    name = getattr(args, "fallback_model", None) or "default model"
+    return f"{backend} ({name})" if backend == "claude" else f"fallback model {name}"
+
+
+def _should_fall_back(args, model: str | None) -> bool:
+    if getattr(args, "fallback_backend", None) == "claude":
+        return True
+    return bool(getattr(args, "fallback_model", None)) and args.fallback_model != model
+
+
 def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
-                       files: list[str] | None = None, model: str | None = None
+                       files: list[str] | None = None, model: str | None = None, backend_override: str | None = None
                        ) -> tuple[bool, str, dict]:
     """Dispatches to whichever editing backend the project asked for.
 
@@ -467,7 +480,11 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
     this is knowing where compute went (which items were expensive,
     whether a retry was worth it), not a dollar figure.
     """
-    backend = cfg("model", "backend", default="aider")
+    backend = backend_override if backend_override else cfg("model", "backend", default="aider")
+    if backend == "claude":
+        success, output = claude_editor.run_claude_on_item(
+            project_dir, item_text, lambda m: log(m, log_path), files=files, model=model)
+        return success, output, claude_editor.last_usage()
     if backend == "lite":
         # Default (lite_editor.DEFAULT_NUM_PREDICT, 8000) is sized for
         # editing existing files, where a genuinely large rewrite is
@@ -772,6 +789,33 @@ def package_json_or_js_html_present(project_dir: Path) -> bool:
 
 
 DEFAULT_MAX_FILE_BYTES = 262144   # 256KB, ~85k tokens of text
+
+
+
+def preflight_todo_rules(todo_path: Path, log_path: Path) -> None:
+    from forge.spec_compiler import validate_item
+    _, items = parse_todo(todo_path)
+    open_items = [it for it in items if it.status == STATUS_OPEN]
+    if not open_items:
+        return
+        
+    any_problems = False
+    for i, item in enumerate(open_items, 1):
+        problems = validate_item(item, todo_path.parent)
+        if problems:
+            if not any_problems:
+                log("=== Preflight Checklist Validation ===", log_path)
+                any_problems = True
+            log(f"Item {i} ({item.text.splitlines()[0][:60]}...):", log_path)
+            for p in problems:
+                log(f"  ⚠ {p}", log_path)
+                
+    if any_problems:
+        log("ERROR: One or more open items violate the formatting rules in the README.", log_path)
+        log("The loop relies on these rules (like naming files in backticks) to safely scope edits.", log_path)
+        log("Please fix the items in your checklist or remove them before running.", log_path)
+        import sys
+        sys.exit(1)
 
 
 def preflight_repo_size(project_dir: Path, log_path: Path) -> list[str]:
@@ -1259,10 +1303,87 @@ def estimate_difficulty(item_text: str) -> str:
     return DIFFICULTY_HARD
 
 
+def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: list[str],
+                    args, log_path: Path, record: dict, finish,
+                    model: str | None = None, backend_override: str | None = None):
+    """Last gate before merge, after every mechanical check (including
+    TDD's red/green check) has passed: a second model reads the diff for
+    wrong logic the mechanical checks can't see - the "silent wrong"
+    class `forge calibrate` measures, and exactly the class that let a
+    TDD item merge here with `entry.amount` (the real field is `.cents`)
+    before this gate was wired into the TDD path too.
+
+    A no-op (returns None immediately) when --review wasn't given, so
+    both call sites can call this unconditionally. Otherwise returns None
+    to mean "approved, proceed to merge", or the (status, record) tuple
+    from `finish()` if the item should be parked instead - callers must
+    check for that and return it directly, the same as any other early
+    exit here.
+    """
+    reviewer = getattr(args, "review", None)
+    if not reviewer:
+        return None
+    review_attempt = 0
+    while True:
+        diff = subprocess.run(["git", "-C", str(worktree_path), "diff", base, "HEAD"],
+                              capture_output=True, text=True).stdout
+        log(f"Asking {reviewer} to review the diff...", log_path)
+        if reviewer == "claude":
+            approved, feedback = claude_editor.review_diff(
+                worktree_path, item_text, diff, lambda m: log(m, log_path),
+                model=getattr(args, "review_model", None))
+        else:
+            try:
+                out = subprocess.run(["agy", "--print",
+                                      f"Review this diff for the task below. The VERY LAST LINE of your "
+                                      f"reply must be exactly one word: APPROVE if it's correct, REJECT "
+                                      f"if not (with your reasons above it).\n\nTask:\n{item_text}"
+                                      f"\n\nDiff:\n{diff}"],
+                                     capture_output=True, text=True, check=True).stdout.strip()
+                last = out.splitlines()[-1].strip().upper() if out else ""
+                approved, feedback = (last == "APPROVE" or (last != "REJECT" and out.upper().startswith("APPROVE"))), out
+            except (OSError, subprocess.CalledProcessError) as e:
+                approved, feedback = None, str(e)
+        if approved:
+            log(f"{reviewer} approved the changes.", log_path)
+            record["review"] = {"reviewer": reviewer, "rounds": review_attempt + 1}
+            return None
+        if approved is None:
+            log(f"{reviewer} review failed to run: {feedback[-500:]}. Parking needs-review.", log_path)
+            return finish(STATUS_NEEDS_REVIEW, f"{reviewer} review could not run")
+        review_attempt += 1
+        if review_attempt > args.max_validation_retries:
+            record["review_feedback"] = feedback[-4000:]
+            log(f"{reviewer} still rejects after {review_attempt - 1} fix round(s). "
+                f"Parking blocked: {item_text}", log_path)
+            return finish(STATUS_BLOCKED, f"{reviewer} review rejected the change")
+        log(f"{reviewer} rejected (round {review_attempt}/{args.max_validation_retries}):\n"
+            f"{feedback[-2000:]}", log_path)
+        fix_success, _, fix_usage = run_editor_on_item(worktree_path, (
+            f"A reviewer rejected the change made for this task.\n\n"
+            f"Original task:\n{item_text}\n\n"
+            f"Reviewer feedback:\n{feedback}\n\n"
+            f"Fix the problems the reviewer lists while still completing the original task."
+        ), log_path, files=expected, model=model, backend_override=backend_override)
+        _accumulate_usage(record, fix_usage)
+        if not fix_success:
+            continue
+        restore_unnamed_files(worktree_path, base, expected, log_path)
+        wt.restore_todo(worktree_path, base, args.todo_file)
+        touched = changed_files(worktree_path, base)
+        record["touched_files"] = touched
+        valid, validation_msg = validate_syntax(worktree_path, log_path,
+                                                scope=[worktree_path / f for f in touched])
+        if not valid:
+            record["validation_output"] = validation_msg[-4000:]
+            log(f"Review fix broke validation, parking blocked: {item_text}", log_path)
+            return finish(STATUS_BLOCKED, "validation failed after review fix")
+
+
 def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
                    test_file: str, impl_file: str, base: str, args, log_path: Path,
                    record: dict, finish, model: str | None = None,
-                   git_lock: threading.RLock | None = None) -> tuple[str, dict]:
+                   git_lock: threading.RLock | None = None, backend_override: str | None = None) -> tuple[str, dict]:
     """Red, then green: aider writes ONLY the test and that test is
     confirmed to fail for a real reason, then a separate aider call
     implements the feature without being allowed to touch the test again.
@@ -1284,7 +1405,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"fail. Do not write a stub or placeholder implementation anywhere to "
         f"make it pass; that defeats the point of writing the test first.\n\n{task_text}"
     )
-    success, _, usage = run_editor_on_item(worktree_path, red_prompt, log_path, files=[test_file], model=model)
+    success, _, usage = run_editor_on_item(worktree_path, red_prompt, log_path, files=[test_file], model=model, backend_override=backend_override)
     _accumulate_usage(record, usage)
     if not success:
         return finish(STATUS_BLOCKED, "TDD red phase: aider itself failed")
@@ -1342,7 +1463,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         f"isn't implemented yet. Implement `{impl_file}` so that test passes.\n\n{task_text}"
     )
     success, _, usage = run_editor_on_item(worktree_path, green_prompt, log_path,
-                                           files=[impl_file, test_file], model=model)
+                                           files=[impl_file, test_file], model=model, backend_override=backend_override)
     _accumulate_usage(record, usage)
     if not success:
         return finish(STATUS_BLOCKED, "TDD green phase: aider itself failed")
@@ -1396,7 +1517,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
             f"Failure output:\n{validation_msg}\n\n"
             f"Fix `{impl_file}` so the test passes. Do not modify `{test_file}` "
             f"or touch any other file."
-        ), log_path, files=[impl_file, test_file], model=model)
+        ), log_path, files=[impl_file, test_file], model=model, backend_override=backend_override)
         _accumulate_usage(record, fix_usage)
         if not fix_success:
             # Deliberately not `break`. A failed fix attempt is often the
@@ -1429,6 +1550,18 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         record["validation_output"] = validation_msg[-4000:]
         return finish(STATUS_BLOCKED, "TDD green phase: validation failed")
 
+    # `files=[impl_file]` only, not the test - a TDD review-fix isn't
+    # allowed to touch the test any more than the earlier validation-fix
+    # retries above were (see test_file_modified_since_red throughout this
+    # function). lite_editor enforces that structurally; for the claude
+    # backend the prompt still says so explicitly.
+    if (gate_result := run_review_gate(worktree_path, base, task_text, [impl_file],
+                                       args, log_path, record, finish, model=model,
+                                       backend_override=backend_override)) is not None:
+        return gate_result
+    if test_file_modified_since_red():
+        return finish(STATUS_NEEDS_REVIEW, f"a review-fix retry modified the test file `{test_file}`")
+
     with git_lock:
         merged, merge_output = wt.merge_ff(project_dir, record["branch"])
         if not merged:
@@ -1440,7 +1573,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
 
 def process_item(project_dir: Path, item: "TodoItem", index: int,
                  args, log_path: Path, model: str | None = None,
-                 git_lock: threading.RLock | None = None) -> tuple[str, dict]:
+                 git_lock: threading.RLock | None = None, backend_override: str | None = None) -> tuple[str, dict]:
     """Run one item in its own worktree. Returns (status, record).
 
     The project checkout is only ever written to by the final
@@ -1500,7 +1633,8 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         test_file, impl_file = classification
         task_text = TDD_PREFIX_RE.sub("", item.text, count=1)
         return run_tdd_phases(project_dir, worktree_path, task_text, test_file, impl_file,
-                              base, args, log_path, record, finish, model=model, git_lock=git_lock)
+                              base, args, log_path, record, finish, model=model, git_lock=git_lock,
+                              backend_override=backend_override)
 
     success = False
     attempt = 0
@@ -1508,7 +1642,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         attempt += 1
         if attempt > 1:
             log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
-        success, _, usage = run_editor_on_item(worktree_path, item.text, log_path, files=expected, model=model)
+        success, _, usage = run_editor_on_item(worktree_path, item.text, log_path, files=expected, model=model, backend_override=backend_override)
         _accumulate_usage(record, usage)
     record["aider_attempts"] = attempt
 
@@ -1573,7 +1707,7 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
             f"Validation failure output:\n{validation_msg}\n\n"
             f"Fix the failure above while still completing the original task. "
             f"Do not revert or abandon the original change; correct it."
-        ), log_path, files=expected, model=model)
+        ), log_path, files=expected, model=model, backend_override=backend_override)
         _accumulate_usage(record, fix_usage)
         if not fix_success:
             # See the same spot in run_tdd_phases for why this continues
@@ -1603,6 +1737,12 @@ def process_item(project_dir: Path, item: "TodoItem", index: int,
         record["validation_output"] = validation_msg[-4000:]
         log(f"Validation failed, parking blocked: {item.text}", log_path)
         return finish(STATUS_BLOCKED, "validation failed")
+
+    if (gate_result := run_review_gate(worktree_path, base, item.text, expected, args, log_path,
+                                       record, finish, model=model,
+                                       backend_override=backend_override)) is not None:
+        return gate_result
+    touched = record.get("touched_files", touched)
 
     if not touched:
         # Every check above passes vacuously when nothing changed, and the
@@ -1781,6 +1921,12 @@ def run_parallel(project_dir: Path, todo_path: Path, args, log_path: Path,
                 f"{item.text.splitlines()[0][:100]} ===", log_path)
             status, record = process_item(project_dir, item, index, args, log_path,
                                           model=model, git_lock=git_lock)
+            if status != STATUS_DONE and _should_fall_back(args, model):
+                log(f"[{tag}] {model} failed [{status}]. Escalating to {_fallback_label(args)}...", log_path)
+                status, record = process_item(project_dir, item, index, args, log_path,
+                                              model=args.fallback_model, git_lock=git_lock,
+                                              backend_override=getattr(args, "fallback_backend", "aider"))
+                record["fallback_used"] = _fallback_label(args)
             record["worker"] = slot
             record["model"] = model
             record["difficulty"] = estimate_difficulty(item.text)
@@ -1844,6 +1990,25 @@ def main():
                               "model. Two or more run that many items concurrently, one worker per "
                               "model - see README's parallel-workers section for why each worker "
                               "is deliberately a DIFFERENT model rather than the same one twice.")
+    parser.add_argument("--fallback-model", default=None, type=str,
+                         help="Model to escalate to if the primary model fails validation/review on an item. "
+                              "Particularly useful when a fast coder model repeatedly chokes on syntax errors "
+                              "and a heavier reasoning model is needed to unblock it.")
+    parser.add_argument("--fallback-backend", default="aider", choices=["aider", "lite", "claude"],
+                         help="Editing backend for the fallback (default: aider). `claude` hands a parked "
+                              "item to the Claude Code CLI (`claude -p`, billed to your subscription, "
+                              "never the API) - --fallback-model is then optional and names a Claude "
+                              "model such as sonnet or opus.")
+    parser.add_argument("--review", choices=["claude", "agy"], default=None,
+                         help="Have a second model review each passing diff before it merges; a "
+                              "rejection is fed back to the editor for up to --max-validation-retries "
+                              "rounds.")
+    parser.add_argument("--review-model", default=None,
+                         help="Claude model for --review claude (default: the CLI's own default).")
+    parser.add_argument("--agy-review", dest="review", action="store_const", const="agy",
+                         help=argparse.SUPPRESS)
+    parser.add_argument("--verbose", action="store_true",
+                         help="Enable verbose output")
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir).expanduser().resolve()
@@ -1900,6 +2065,7 @@ def main():
             f"See the README for what it configures (author model, validate "
             f"commands, preflight limits).", log_path)
 
+    preflight_todo_rules(todo_path, log_path)
     preflight_repo_size(project_dir, log_path)
 
     runs_dir = wt.runs_root(project_dir) / datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1938,6 +2104,11 @@ def main():
         log(f"=== Item {index}: {item.text} ===", log_path)
 
         status, record = process_item(project_dir, item, index, args, log_path, model=single_model)
+
+        if status != STATUS_DONE and _should_fall_back(args, single_model):
+            log(f"Model {single_model} failed [{status}]. Escalating to {_fallback_label(args)}...", log_path)
+            status, record = process_item(project_dir, item, index, args, log_path, model=args.fallback_model, backend_override=getattr(args, "fallback_backend", "aider"))
+            record["fallback_used"] = _fallback_label(args)
 
         item.status = status
         write_todo(todo_path, raw_lines, items)
