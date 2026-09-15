@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import claude_editor, config, lite_editor
+from . import agy_editor, claude_editor, config, lite_editor
 from . import worktree as wt
 from .config import (
     CONFIG_FILENAME,
@@ -61,6 +61,8 @@ from .validator import (
 # estimate_difficulty()'s docstring for the reasoning, and README's
 # "Parallel workers" section for how tiers map to worker slots.
 DIFFICULTY_EASY = "easy"
+# Backends that hand the item to a hosted model's CLI rather than a local one.
+CLOUD_BACKENDS = ("claude", "agy")
 DIFFICULTY_HARD = "hard"
 
 
@@ -106,6 +108,21 @@ def estimate_difficulty(item_text: str) -> str:
 
 def is_git_repo(project_dir: Path) -> bool:
     return (project_dir / ".git").exists()
+
+
+def repair_prompt(item_text: str, note: str) -> str:
+    """The editor prompt for --repair-from: the original task, why the
+    earlier attempt (already committed in the worktree) was rejected, and
+    an instruction to fix rather than restart."""
+    note = note.strip() or "(no failure details were recorded)"
+    return (
+        f"{item_text}\n\n"
+        f"A previous attempt at this task is already committed in this repository, "
+        f"but it was rejected. Why it was rejected:\n\n{note}\n\n"
+        f"Fix the problems above so the task is fully and correctly done. Keep the "
+        f"parts of the previous attempt that are correct; only start over if it is "
+        f"unsalvageable."
+    )
 
 
 def git_head(project_dir: Path) -> str | None:
@@ -259,11 +276,11 @@ def parse_aider_token_line(output: str) -> dict:
 def _fallback_label(args) -> str:
     backend = getattr(args, "fallback_backend", "aider")
     name = getattr(args, "fallback_model", None) or "default model"
-    return f"{backend} ({name})" if backend == "claude" else f"fallback model {name}"
+    return f"{backend} ({name})" if backend in CLOUD_BACKENDS else f"fallback model {name}"
 
 
 def _should_fall_back(args, model: str | None) -> bool:
-    if getattr(args, "fallback_backend", None) == "claude":
+    if getattr(args, "fallback_backend", None) in CLOUD_BACKENDS:
         return True
     return bool(getattr(args, "fallback_model", None)) and args.fallback_model != model
 
@@ -297,6 +314,10 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
         success, output = claude_editor.run_claude_on_item(
             project_dir, item_text, lambda m: log(m, log_path), files=files, model=model)
         return success, output, claude_editor.last_usage()
+    if backend == "agy":
+        success, output = agy_editor.run_agy_on_item(
+            project_dir, item_text, lambda m: log(m, log_path), files=files, model=model)
+        return success, output, agy_editor.last_usage()
     if backend == "lite":
         # Default (lite_editor.DEFAULT_NUM_PREDICT, 8000) is sized for
         # editing existing files, where a genuinely large rewrite is
@@ -550,7 +571,25 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
     if expected:
         log(f"Handing aider the file(s) the item named: {expected}", log_path)
 
-    if is_tdd_item(item.text):
+    # Repair mode (--repair-from): start from an earlier, parked attempt and
+    # ask the editor to fix it. `base` deliberately stays the original base,
+    # so every check below still judges the whole change, not just the fix.
+    editor_task = item.text
+    repair_from = getattr(args, "repair_from", None)
+    if repair_from:
+        if not wt.start_from(worktree_path, repair_from):
+            log(f"--repair-from {repair_from} is not a commit in this repo. Parking: {item.text}",
+                log_path)
+            return finish(STATUS_BLOCKED, f"repair source {repair_from} not found")
+        record["mode"] = "repair"
+        record["repair_from"] = repair_from
+        editor_task = repair_prompt(item.text, getattr(args, "repair_note_text", ""))
+        log(f"Repair mode: starting from {repair_from}", log_path)
+
+    # A TDD item's red/green phases can't be replayed on top of an attempt
+    # that already wrote the test, so repair takes the single-pass path with
+    # both files named; the project's validate commands still run the tests.
+    if is_tdd_item(item.text) and not repair_from:
         classification = classify_tdd_files(expected)
         if classification is None:
             log(f"TDD item but couldn't identify one test file and one implementation "
@@ -571,11 +610,14 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
         if attempt > 1:
             log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
         config.emit_stage(index, item.text, "coding", expected)
-        success, _, usage = run_editor_on_item(worktree_path, item.text, log_path,
+        success, _, usage = run_editor_on_item(worktree_path, editor_task, log_path,
                                                files=expected, model=model,
                                                backend_override=backend_override)
         _accumulate_usage(record, usage, model=model)
     record["aider_attempts"] = attempt
+
+    if success and getattr(args, "snapshot_first_attempt", False):
+        record["first_attempt_commit"] = wt.snapshot_first_attempt(worktree_path, branch)
 
     if not success:
         log(f"Aider failed after {attempt} attempt(s), parking blocked: {item.text}", log_path)
@@ -835,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
                          help="Keep the per-item branch even for items that passed and merged "
                               "(a failed item's branch is always kept - it's the only copy of "
                               "what the model produced).")
-    parser.add_argument("--backend", default=None, choices=["aider", "lite"],
+    parser.add_argument("--backend", default=None, choices=["aider", "lite", "claude", "agy"],
                          help="Which editing backend to use, overriding [model] backend in "
                               ".aiderloop.toml. 'aider' (the default) shells out to aider; "
                               "'lite' uses lite_editor.py, built for exactly this loop's usage - "
@@ -853,11 +895,12 @@ def main(argv: list[str] | None = None) -> int:
                          help="Model to escalate to if the primary model fails validation/review on an item. "
                               "Particularly useful when a fast coder model repeatedly chokes on syntax errors "
                               "and a heavier reasoning model is needed to unblock it.")
-    parser.add_argument("--fallback-backend", default="aider", choices=["aider", "lite", "claude"],
+    parser.add_argument("--fallback-backend", default="aider", choices=["aider", "lite", "claude", "agy"],
                          help="Editing backend for the fallback (default: aider). `claude` hands a parked "
                               "item to the Claude Code CLI (`claude -p`, billed to your subscription, "
                               "never the API) - --fallback-model is then optional and names a Claude "
-                              "model such as sonnet or opus.")
+                              "model such as sonnet or opus. `agy` does the same through the agy CLI, "
+                              "with --fallback-model naming one of `agy models`, e.g. gemini-3.8-flash-high.")
     parser.add_argument("--review", choices=["claude", "agy", "ollama"], default=None,
                          help="Have a second model review each passing diff before it merges; a "
                               "rejection is fed back to the editor for up to --max-validation-retries "
@@ -866,9 +909,29 @@ def main(argv: list[str] | None = None) -> int:
                          help="Claude model for --review claude (default: the CLI's own default).")
     parser.add_argument("--agy-review", dest="review", action="store_const", const="agy",
                          help=argparse.SUPPRESS)
+    parser.add_argument("--snapshot-first-attempt", action="store_true",
+                         help="Pin each item's first successful editor attempt, before any check, "
+                              "restore or retry changes it, at refs/leash/first-attempt/<branch> "
+                              "and record it as first_attempt_commit. For benchmarks that grade "
+                              "the unchecked output of the same attempt the checks judged.")
+    parser.add_argument("--repair-from", default=None, metavar="REV",
+                         help="Start the item from REV (typically a parked item's branch) instead of "
+                              "HEAD and ask the editor to fix that attempt. Checks still diff against "
+                              "the original base. TDD items take the single-pass path in this mode.")
+    parser.add_argument("--repair-note", default=None, metavar="FILE",
+                         help="With --repair-from: a file explaining why the earlier attempt was "
+                              "rejected (the parked record's reason and check output).")
     parser.add_argument("--verbose", action="store_true",
                          help="Enable verbose output")
     args = parser.parse_args(argv)
+    args.repair_note_text = ""
+    if args.repair_note:
+        if not args.repair_from:
+            parser.error("--repair-note requires --repair-from")
+        try:
+            args.repair_note_text = Path(args.repair_note).read_text(encoding="utf-8")
+        except OSError as e:
+            parser.error(f"cannot read --repair-note: {e}")
 
     project_dir = Path(args.project_dir).expanduser().resolve()
     from . import config
@@ -891,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit(1)
     backend = cfg("model", "backend", default="aider")
     log(f"Editing backend: {backend}", log_path)
-    if backend != "lite" and not (project_dir / ".aider.conf.yml").is_file():
+    if backend == "aider" and not (project_dir / ".aider.conf.yml").is_file():
         log("Warning: no .aider.conf.yml found in project dir - aider will use "
             "its own defaults, which may not be your local Qwen setup.", log_path)
 

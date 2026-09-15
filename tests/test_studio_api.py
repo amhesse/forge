@@ -71,7 +71,7 @@ class TestEngineRouting(unittest.TestCase):
     def test_resolve_engine(self):
         self.assertEqual(resolve_engine("claude"), ("claude", None))
         self.assertEqual(resolve_engine("claude:claude-opus-5"), ("claude", "claude-opus-5"))
-        self.assertEqual(resolve_engine("gemini:gemini-2.5-pro"), ("gemini", "gemini-2.5-pro"))
+        self.assertEqual(resolve_engine("gemini:gemini-3.8-flash-high"), ("gemini", "gemini-3.8-flash-high"))
         self.assertEqual(resolve_engine("qwen3-coder:30b"), ("ollama", "qwen3-coder:30b"))
         self.assertEqual(resolve_engine(""), ("ollama", None))
         # A local model whose name merely starts with "claude" is still Ollama.
@@ -109,6 +109,19 @@ class TestEngineRouting(unittest.TestCase):
         argv = self._argv(backend="lite", model="qwen2.5-coder:14b", fallback_model="qwen3-coder:30b")
         self.assertEqual(argv[argv.index("--fallback-model") + 1], "qwen3-coder:30b")
         self.assertEqual(argv[argv.index("--fallback-backend") + 1], "lite")
+
+    def test_argv_gemini_uses_agy_backend(self):
+        argv = self._argv(model="gemini:gemini-3.8-flash-high", fallback_model="gemini:gemini-3.1-pro-high")
+        self.assertEqual(argv[argv.index("--backend") + 1], "agy")
+        self.assertEqual(argv[argv.index("--models") + 1], "gemini-3.8-flash-high")
+        self.assertEqual(argv[argv.index("--fallback-backend") + 1], "agy")
+        self.assertEqual(argv[argv.index("--fallback-model") + 1], "gemini-3.1-pro-high")
+
+    def test_run_llm_agy_puts_print_last(self):
+        done = subprocess.CompletedProcess([], 0, stdout="ok\n", stderr="")
+        with patch("forge.studio.subprocess.run", return_value=done) as run:
+            self.assertEqual(studio.run_llm("gemini:gemini-3.8-flash-high", "hi"), "ok")
+        self.assertEqual(run.call_args[0][0], ["agy", "--model", "gemini-3.8-flash-high", "--print", "hi"])
 
     def test_argv_bad_limit_is_ignored(self):
         self.assertNotIn("--max-items", self._argv(max_items="abc"))

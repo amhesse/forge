@@ -41,6 +41,7 @@ import hashlib
 import html
 import io
 import json
+import os
 import queue
 import re
 import subprocess
@@ -133,10 +134,11 @@ def build_runner_argv(project_dir: Path, options: dict) -> list[str]:
         if model:
             argv += ["--models", model]
     elif engine == "gemini":
-        # Gemini as the doer goes through aider, which names models
-        # provider/model rather than provider:model.
-        backend = "aider"
-        argv += ["--models", f"gemini/{model}" if model else "gemini"]
+        # Gemini runs through forge's agy backend (the agy CLI), which
+        # takes agy's own model ids, e.g. gemini-3.8-flash-high.
+        backend = "agy"
+        if model:
+            argv += ["--models", model]
     elif model:
         argv += ["--models", model]
     argv += ["--backend", backend]
@@ -162,8 +164,7 @@ def build_runner_argv(project_dir: Path, options: dict) -> list[str]:
         if engine == "claude":
             argv += ["--fallback-backend", "claude"] + (["--fallback-model", model] if model else [])
         elif engine == "gemini":
-            argv += ["--fallback-backend", "aider",
-                     "--fallback-model", f"gemini/{model}" if model else "gemini"]
+            argv += ["--fallback-backend", "agy"] + (["--fallback-model", model] if model else [])
         else:
             argv += ["--fallback-model", model,
                      "--fallback-backend", options.get("fallback_backend") or backend]
@@ -188,11 +189,14 @@ def run_llm(value: str | None, prompt: str, *, timeout: float = 600.0,
     RuntimeError with the engine's own error text on failure."""
     engine, model = resolve_engine(value)
     if engine in ("claude", "gemini"):
-        cmd = ["claude", "-p"] if engine == "claude" else ["agy", "--print"]
-        if model and engine == "claude":
-            cmd += ["--model", model]
+        if engine == "claude":
+            cmd = ["claude", "-p"] + (["--model", model] if model else []) + [prompt]
+        else:
+            # agy's --print consumes the next argument, so it must come last.
+            cmd = ["agy"] + (["--model", model] if model else []) + ["--print", prompt]
         try:
-            res = subprocess.run(cmd + [prompt], capture_output=True, text=True, timeout=timeout)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                                 stdin=subprocess.DEVNULL)
         except FileNotFoundError:
             raise RuntimeError(f"`{cmd[0]}` CLI not found on PATH")
         except subprocess.TimeoutExpired:

@@ -16,9 +16,9 @@ const CLI_MODEL_OPTIONS = [
   { val: 'claude', text: 'Claude CLI (Default)' },
   { val: 'claude:claude-opus-5', text: 'Claude Opus 5 (CLI)' },
   { val: 'claude:claude-sonnet-5', text: 'Claude Sonnet 5 (CLI)' },
-  { val: 'gemini', text: 'Gemini CLI (Default)' },
-  { val: 'gemini:gemini-2.5-pro', text: 'Gemini 2.5 Pro (CLI)' },
-  { val: 'gemini:gemini-2.5-flash', text: 'Gemini 2.5 Flash (CLI)' },
+  { val: 'gemini:gemini-3.8-flash-high', text: 'Gemini 3.8 Flash High (agy)' },
+  { val: 'gemini:gemini-3.8-flash-medium', text: 'Gemini 3.8 Flash Medium (agy)' },
+  { val: 'gemini:gemini-3.1-pro-high', text: 'Gemini 3.1 Pro High (agy)' },
 ];
 const MODEL_PICKERS = [
   { id: 'run-model', defaultVal: DEFAULT_OLLAMA_MODEL, includeNone: false },

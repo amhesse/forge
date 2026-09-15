@@ -256,3 +256,37 @@ def remove(project_dir: Path, worktree: Path, branch: str, keep_branch: bool) ->
     _git(["worktree", "prune"], project_dir)
     if not keep_branch:
         _git(["branch", "-D", branch], project_dir)
+
+
+FIRST_ATTEMPT_REF_PREFIX = "refs/leash/first-attempt/"
+
+
+def snapshot_first_attempt(worktree: Path, branch: str) -> str | None:
+    """Pins the worktree's current HEAD - the editor's first successful
+    attempt, before any check restores, retries or reviews touch it - at
+    refs/leash/first-attempt/<branch>, and returns the commit.
+
+    A ref rather than a tag or a kept branch: worktrees share the project's
+    refs, so it outlives remove() without showing up in `git branch`, where
+    it would look like one more parked item. Used by `forge run
+    --snapshot-first-attempt` so a benchmark can grade what the model
+    produced with no safety net at all, from the same attempt the checks
+    then judged."""
+    head = _git(["rev-parse", "HEAD"], worktree)
+    if head.returncode != 0:
+        return None
+    commit = head.stdout.strip()
+    ref = FIRST_ATTEMPT_REF_PREFIX + branch
+    if _git(["update-ref", ref, commit], worktree).returncode != 0:
+        return None
+    return commit
+
+
+def start_from(worktree: Path, rev: str) -> bool:
+    """Moves a freshly created item worktree (and its branch) onto `rev`,
+    for repair mode: the item starts from an earlier attempt's commits
+    instead of the base, while callers keep diffing against the original
+    base so every check still judges the whole change."""
+    if _git(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], worktree).returncode != 0:
+        return False
+    return _git(["reset", "-q", "--hard", rev], worktree).returncode == 0

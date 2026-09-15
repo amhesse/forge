@@ -155,6 +155,9 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
     _accumulate_usage(record, usage)
     if not success:
         return finish(STATUS_BLOCKED, "TDD green phase: aider itself failed")
+    if getattr(args, "snapshot_first_attempt", False):
+        # Red test + implementation, before the green-phase checks judge it.
+        record["first_attempt_commit"] = wt.snapshot_first_attempt(worktree_path, record["branch"])
 
     def test_file_modified_since_red() -> bool:
         # Byte-identical to what the red phase produced, not just "not
