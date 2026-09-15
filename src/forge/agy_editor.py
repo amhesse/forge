@@ -16,7 +16,16 @@ CLI details that matter here, found by running it rather than assumed:
 - `--output-format json` prints one object: status "SUCCESS" or "ERROR",
   `response`, `error`, `duration_seconds` and `usage` (input, output,
   thinking and cache-read tokens). Errors also exit non-zero.
+- Print mode stops waiting after `--print-timeout` (default 5m) and then
+  reports status SUCCESS with an empty response and exit 0, printing
+  "[agy] print timeout after ... with turn in progress" to stderr - it
+  looks exactly like a model that chose to change nothing. Found live: a
+  Gemini repair that needed longer than 5 minutes was retried three times
+  and parked as a real failure. The print timeout is therefore set to this
+  module's own timeout, and a timeout message is treated as a timeout.
 """
+
+import re
 
 import json
 import subprocess
@@ -24,6 +33,9 @@ from pathlib import Path
 
 AGY_BIN = "agy"
 DEFAULT_TIMEOUT = 1800
+# How long past agy's own print timeout the process may run before it is killed.
+_PROCESS_GRACE = 60
+_PRINT_TIMEOUT_RE = re.compile(r"print timeout after (\S+) with turn in progress")
 
 _last_usage: dict = {}
 
@@ -36,18 +48,24 @@ def _run(cwd: Path, prompt: str, model: str | None, timeout: int, log) -> tuple[
     """One `agy` print-mode call. Returns (ok, response text) and records usage."""
     global _last_usage
     _last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
-    cmd = [AGY_BIN, "--mode", "accept-edits", "--sandbox", "--output-format", "json"]
+    cmd = [AGY_BIN, "--mode", "accept-edits", "--sandbox", "--output-format", "json",
+           "--print-timeout", f"{timeout}s"]
     if model:
         cmd += ["--model", model]
     cmd += ["--print", prompt]  # must be last: --print consumes the next argument
     try:
         result = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
-                                timeout=timeout, stdin=subprocess.DEVNULL)
+                                timeout=timeout + _PROCESS_GRACE, stdin=subprocess.DEVNULL)
     except FileNotFoundError:
         log(f"agy CLI not found on PATH ({AGY_BIN})")
         return False, "agy CLI not found"
     except subprocess.TimeoutExpired:
         log(f"agy timed out after {timeout}s")
+        return False, "timeout"
+    waited = _PRINT_TIMEOUT_RE.search(result.stderr or "")
+    if waited:
+        # Not a result: agy gave up waiting on a turn still in progress.
+        log(f"agy timed out after {waited.group(1)} (print timeout, turn still in progress)")
         return False, "timeout"
     try:
         data = json.loads(result.stdout)

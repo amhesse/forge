@@ -202,6 +202,8 @@ class LeashHookTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-high")
         for flag in ("--sandbox", "--output-format"):
             self.assertIn(flag, argv)
+        # agy's own 5-minute print timeout must not cut a repair short.
+        self.assertEqual(argv[argv.index("--print-timeout") + 1], "1800s")
         rec = self.record()
         self.assertEqual(rec["tokens"]["prompt_tokens"], 150)
         self.assertEqual(rec["tokens"]["completion_tokens"], 25)
@@ -216,6 +218,22 @@ class LeashHookTest(unittest.TestCase):
         stub.chmod(0o755)
         log = self.forge_run("--backend", "agy", "--max-retries", "0")
         self.assertIn("agy reported an error: quota exceeded", log)
+        self.assertIn("- [!]", (self.proj / "TODO.md").read_text())
+        self.assertIn("itself failed", self.record()["reason"])
+
+    def test_agy_print_timeout_is_a_timeout_not_no_change(self):
+        # Real agy output when its print timeout expires: SUCCESS, empty
+        # response, exit 0, and a stderr notice - not "changed nothing".
+        self.init_repo("- [ ] In `mod.py`, set a value.\n")
+        stub = self.bin / "agy"
+        stub.write_text(
+            f"#!{sys.executable}\nimport json, sys\n"
+            "sys.stderr.write('[agy] print timeout after 5m0s with turn in progress; returning partial output\\n')\n"
+            "print(json.dumps({'status': 'SUCCESS', 'response': '', 'duration_seconds': 0, 'usage': {}}))\n")
+        stub.chmod(0o755)
+        log = self.forge_run("--backend", "agy", "--max-retries", "0")
+        self.assertIn("agy timed out after 5m0s (print timeout, turn still in progress)", log)
+        self.assertNotIn("finished but changed nothing", log)
         self.assertIn("- [!]", (self.proj / "TODO.md").read_text())
         self.assertIn("itself failed", self.record()["reason"])
 
