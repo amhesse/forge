@@ -5,6 +5,7 @@ into this project, see *Editing backend* below — unattended against a
 markdown checklist, with a safety net between each item and the next.
 
     pipx install -e .        # or: pip install -e . --break-system-packages
+    forge studio --project-dir ~/projects/thing --port 8888  # Live telemetry & studio UI
     forge run --project-dir ~/projects/thing --todo-file TODO.md
     forge draft --project-dir ~/projects/thing --goal "..."
     forge review --project-dir ~/projects/thing
@@ -173,6 +174,31 @@ No login, no token: there's nothing reachable here that isn't already a
 `git` command sitting in your own shell history, and it binds to
 `127.0.0.1` only. Stdlib only, like the rest of this project — a browser
 tab and a project directory are the only things this needs.
+
+## Forge Studio: Live Telemetry, Spec Architect & Adversarial Critic
+
+    forge studio --project-dir ~/projects/thing --port 8888 --open
+
+Forge Studio combines real-time loop telemetry, interactive execution controls, an in-browser spec architect with deterministic rule linting, and visual branch diff review with an automated adversarial code critic into a single local web environment.
+
+- **100% Local & Stdlib-Only**: Binds to `127.0.0.1:8888`. Zero third-party Python packages, zero node/npm build step, styled with Catppuccin Mocha.
+- **Live Telemetry & Pipeline Stepper**:
+  - Live progress stepper through `Idle` -> `Worktree` -> `Coding` -> `Validation` -> `Merged`/`Parked`.
+  - Inference speed tracking (live tokens/second and peak rate).
+  - Hardware gauges for NVIDIA RTX GPUs (VRAM used/total, GPU temp, wattage) and Ollama loaded models and context limits.
+  - Real-time terminal streaming via Server-Sent Events (SSE).
+- **Interactive Run Controls**:
+  - Start and stop the loop directly from the header toolbar.
+  - Switch between `Lite` (whole-file) and `Aider` (diff) backends.
+  - Select active Ollama models on the fly.
+- **Spec Architect & Rule Linter**:
+  - Interactive `TODO.md` editor with auto-discovery and instant saving.
+  - Real-time rule linter: flags missing backtick file targets (fatal), hallucinated anchor lines (fatal), or oversized items (advisory warnings).
+  - AI Goal Decomposer: enter a high-level feature goal and have the local reasoning model draft valid, single-file tasks.
+- **Diff Reviewer & The Adversarial Critic**:
+  - Syntax-highlighted unified diffs for all parked worktree branches.
+  - One-click **Adversarial Critic**: prompts the model to perform a rigorous security and edge-case review of the diff with a verdict (`APPROVE`, `CAUTION`, `REJECT`) before merging.
+  - One-click **Merge Anyway** (`git merge --no-ff`) and **Discard** (`git branch -D`).
 
 ## Parallel workers
 

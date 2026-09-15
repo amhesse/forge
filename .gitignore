@@ -1,13 +1,26 @@
+# Python & byte-code
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Aider & Forge local logs, telemetry, and histories
 .aider.chat.history.md
 .aider.input.history
-aider_loop.log
 .aider.tags.cache.v4/
-build/
-dist/
-*.egg-info/
-*.pyc
-__pycache__/
-.venv/
-calibration.jsonl
-calibration-*.jsonl
-calibration.log
+*.log
+*.jsonl
+*.csv
+
+# Local environment & secrets
+.env
+.env.*
+

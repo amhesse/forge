@@ -114,6 +114,22 @@ def recent_merged(project_dir: Path, limit: int = 8) -> list[str]:
 STATUS_LABEL = {"!": "blocked", "?": "needs review", None: "unknown (no run record)"}
 
 
+def colorize_diff(diff_text: str) -> str:
+    esc = html.escape
+    out = []
+    for line in diff_text.splitlines():
+        escaped = esc(line)
+        if line.startswith("+") and not line.startswith("+++"):
+            out.append(f'<span class="diff-add">{escaped}</span>')
+        elif line.startswith("-") and not line.startswith("---"):
+            out.append(f'<span class="diff-del">{escaped}</span>')
+        elif line.startswith("@@"):
+            out.append(f'<span class="diff-hunk">{escaped}</span>')
+        else:
+            out.append(escaped)
+    return "\n".join(out)
+
+
 def render_page(project_dir: Path, message: str | None = None) -> str:
     branches = list_pending_branches(project_dir)
     items = []
@@ -136,6 +152,7 @@ def render_page(project_dir: Path, message: str | None = None) -> str:
         val_out = rec.get("validation_output")
         val_block = (f'<details><summary>Validation output</summary><pre>{esc(val_out)}</pre></details>'
                     if val_out else "")
+        diff_html = colorize_diff(it["diff"]) if it["diff"] else "(empty diff)"
         rows.append(f"""
         <div class="item">
           <div class="item-head">
@@ -148,7 +165,7 @@ def render_page(project_dir: Path, message: str | None = None) -> str:
           {val_block}
           <details {"open" if it["diff"] else ""}>
             <summary>Diff ({esc(" · ".join(l.strip() for l in it["stat"].strip().splitlines()) or "no diff")})</summary>
-            <pre class="diff">{esc(it["diff"]) or "(empty diff)"}</pre>
+            <pre class="diff">{diff_html}</pre>
           </details>
           <form method="post" action="/action" class="actions">
             <input type="hidden" name="branch" value="{branch}">
@@ -163,20 +180,22 @@ def render_page(project_dir: Path, message: str | None = None) -> str:
           </form>
         </div>""")
 
-    body = "\n".join(rows) if rows else '<p class="empty">Nothing parked. Every item either passed or the queue is empty.</p>'
-    recent = "\n".join(f"<li><code>{esc(l)}</code></li>" for l in recent_merged(project_dir))
+    body = "\n".join(rows) if rows else '<p class="empty">No pending aider-loop branches to review.</p>'
     banner = f'<div class="banner">{esc(message)}</div>' if message else ""
+    recent = "\n".join(f"<li><code>{esc(line)}</code></li>"
+                       for line in recent_merged(project_dir)) or "<li>(none)</li>"
 
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <title>aider-loop review — {esc(project_dir.name)}</title>
 <style>
-  body {{ font: 14px/1.5 -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem;
-         background: #f7f7f8; color: #1a1a1a; }}
-  h1 {{ font-size: 1.3rem; }}
-  .banner {{ background: #eaffea; border: 1px solid #9c9; padding: 0.5rem 1rem; border-radius: 6px; margin-bottom: 1rem; }}
-  .item {{ background: white; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }}
-  .item-head {{ display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.4rem; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #111; }}
+  h1 {{ font-size: 1.4rem; }}
+  .banner {{ background: #eef6ff; border-left: 4px solid #0366d6; padding: 0.6rem 0.9rem;
+             margin-bottom: 1.5rem; border-radius: 3px; font-size: 0.9rem; }}
+  .item {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }}
+  .item-head {{ display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }}
   .status {{ font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
              padding: 0.15rem 0.5rem; border-radius: 4px; font-weight: 600; }}
   .status-\\! {{ background: #ffe0e0; color: #a00; }}
@@ -187,6 +206,9 @@ def render_page(project_dir: Path, message: str | None = None) -> str:
   .reason {{ font-size: 0.9rem; color: #333; margin-bottom: 0.5rem; }}
   pre {{ background: #f4f4f4; padding: 0.7rem; border-radius: 6px; overflow-x: auto; font-size: 0.82rem; }}
   pre.diff {{ max-height: 400px; overflow-y: auto; }}
+  .diff-add {{ color: #1a7f37; background: #e6ffec; display: block; }}
+  .diff-del {{ color: #cf222e; background: #ffebe9; display: block; }}
+  .diff-hunk {{ color: #0969da; background: #ddf4ff; font-weight: bold; display: block; }}
   .actions button {{ padding: 0.4rem 0.9rem; border-radius: 6px; border: 1px solid #ccc;
                      cursor: pointer; margin-right: 0.5rem; font-size: 0.85rem; }}
   .actions .merge {{ background: #1a7f37; color: white; border-color: #1a7f37; }}

@@ -132,6 +132,9 @@ like this - nothing else may appear on the marker lines themselves:
 Rules:
 - Write out the WHOLE file, not a diff or a snippet - every line that
   should exist in the final file, including lines you are not changing.
+- NEVER use placeholders or abbreviation comments like "... existing content ...",
+  "/* ... existing code ... */", or "// ... rest of code unchanged ...".
+  Every single line of the file must be present in your output.
 - One ===FILE:===...===END=== block per file. Only write files you were
   told to write; do not create, rename, or delete any other file.
 - The path after "FILE:" must be EXACTLY one of the paths you were given

@@ -54,6 +54,7 @@ from pathlib import Path
 # one changes how aider behaves: silently running without them is worse
 # than not running at all, because the run still produces commits.
 MATERIALIZE_FILES = (
+    ".forge.toml",
     ".aider.conf.yml",
     ".aider.model.settings.yml",
     ".aiderignore",

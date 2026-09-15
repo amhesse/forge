@@ -1,6 +1,6 @@
-"""The `forge` command: one entry point, five subcommands.
+"""The `forge` command: one entry point, six subcommands.
 
-Deliberately thin - it does not touch argparse in any of the five
+Deliberately thin - it does not touch argparse in any of the six
 modules below, which each already parse `sys.argv` themselves (that's
 what let this file exist without risking a single line of change to
 code that has already survived real bugs this session). It just picks
@@ -23,11 +23,19 @@ commands:
            (was: review_server.py)
   eval     Run forge's own regression suite against stub editors
   calibrate  Measure which item kinds each model handles (strong vs weak tier)
+  studio   Open the Forge Studio visual dashboard & telemetry workshop
 
 Run `forge <command> --help` for that command's own options.
 """
 
-COMMANDS = {"run": "aider_loop", "draft": "spec_compiler", "review": "review_server", "eval": "eval", "calibrate": "calibrate"}
+COMMANDS = {
+    "run": "runner",
+    "draft": "spec_compiler",
+    "review": "review_server",
+    "eval": "eval",
+    "calibrate": "calibrate",
+    "studio": "studio",
+}
 
 
 def main(argv: list[str] | None = None) -> int:

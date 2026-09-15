@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Forge Studio</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-logo">
+        <div class="led-dot" id="led-indicator"></div>
+        FORGE STUDIO
+      </div>
+      <div class="status-pill" id="status-pill">
+        <span id="status-text">{{status}}</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; background: var(--card-raised); padding: 0.2rem 0.5rem; border-radius: 4px; border: 1px solid var(--border-bright);">
+        <span style="font-size: 0.65rem; color: var(--text-white); font-weight: 800; text-transform: uppercase;">Project:</span>
+        <select id="project-select" title="Active Repository" style="border: none; background: transparent; padding-left: 0; margin: 0; font-weight: bold; width: 150px;">
+          <option value="{{project_dir}}">{{project_name}}</option>
+        </select>
+        <button class="btn-white" onclick="openProjectPathModal()" style="padding: 0 0.4rem; font-size: 0.65rem; height: 22px;" title="Open a project by path">Open…</button>
+      </div>
+    </div>
+
+    <!-- Technical Nav Tabs -->
+    <nav class="nav-tabs">
+      <button class="nav-tab active" id="tabbtn-dashboard" onclick="showTab('dashboard')">
+        01 // DASHBOARD
+      </button>
+      <button class="nav-tab" id="tabbtn-todo" onclick="showTab('todo')">
+        02 // Todo List & Spec Architect <span class="badge-count" id="badge-todo-count">0</span>
+      </button>
+      <button class="nav-tab" id="tabbtn-worktrees" onclick="showTab('worktrees')">
+        03 // Diff & Critic <span class="badge-count" id="badge-branches-count">0</span>
+      </button>
+    </nav>
+
+  </header>
+
+  <!-- TAB 1: Dashboard & Telemetry -->
+  <main class="tab-content active" id="tab-dashboard">
+    <!-- Top Grid: Pipeline Stepper + Model Routing Controls -->
+    <div class="dashboard-top-grid">
+      <!-- Pipeline Stepper (Compact left side) -->
+      <div class="stepper-card">
+        <div class="stepper-title">
+          <span>Execution Pipeline State</span>
+          <span id="stepper-task-text" style="color: var(--text-white);"></span>
+          <span id="stepper-elapsed" class="stepper-elapsed"></span>
+        </div>
+        <div class="stepper">
+          <div class="step active" id="step-idle" title="Awaiting next task"><div class="step-icon">01</div><span>Idle</span></div>
+          <div class="step" id="step-worktree" title="Branching and checking out workspace"><div class="step-icon">02</div><span>Worktree</span></div>
+          <div class="step" id="step-coding" title="Model is actively writing code"><div class="step-icon">03</div><span>Coding</span></div>
+          <div class="step" id="step-validating" title="Running tests and linting"><div class="step-icon">04</div><span>Validation</span></div>
+          <div class="step" id="step-merged" title="Changes merged back to master"><div class="step-icon">05</div><span>Merged</span></div>
+          <div class="step step-parked" id="step-parked" title="Item did not pass - its work is on a parked branch"><div class="step-icon">!!</div><span>Parked</span></div>
+        </div>
+        <div class="stepper-note" id="stepper-note" hidden></div>
+      </div>
+
+      <!-- Model Routing & Run Controls (Right side) -->
+      <div class="routing-card">
+        <div class="routing-title">
+          <span>Model Routing & Loop Control</span>
+          <span style="font-size: 0.65rem; color: var(--text-dim);">MULTI-TIER DISPATCH</span>
+        </div>
+        <div class="model-pickers">
+          <div class="model-picker-group">
+            <label class="model-picker-label" for="run-model">01 // Doer (Coder)</label>
+            <select id="run-model" title="Primary Coder / Worker Model">
+              <option value="qwen3-coder:30b">qwen3-coder:30b (Ollama)</option>
+            </select>
+          </div>
+          <div class="model-picker-group">
+            <label class="model-picker-label" for="review-model">02 // Review (Critic)</label>
+            <select id="review-model" title="Adversarial Critic / Review Model">
+              <option value="" selected>None (Disabled)</option>
+              <option value="claude">Claude CLI (Default)</option>
+              <option value="gemini:gemini-2.5-pro">Gemini 2.5 Pro (CLI)</option>
+            </select>
+          </div>
+          <div class="model-picker-group">
+            <label class="model-picker-label" for="escalate-model">03 // Escalate (Fallback)</label>
+            <select id="escalate-model" title="Escalation / Fallback Model">
+              <option value="" selected>None (Disabled)</option>
+              <option value="gemini:gemini-2.5-pro">Gemini 2.5 Pro (CLI)</option>
+              <option value="claude">Claude CLI (Default)</option>
+            </select>
+          </div>
+        </div>
+        <div class="routing-controls">
+          <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <select id="run-backend" title="Execution Backend">
+              <option value="lite" selected>Backend: Lite</option>
+              <option value="aider">Backend: Aider</option>
+            </select>
+            <button id="btn-start-ollama" class="btn-white" onclick="startOllama()" style="padding: 0 0.5rem; font-size: 0.68rem; height: 28px;" title="Check / Start Ollama service">Start Ollama</button>
+          </div>
+          <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 0.45rem; background: var(--card-raised); padding: 0.25rem 0.6rem; border-radius: 4px; border: 1px solid var(--border);" title="Batch Item Limit: Maximum number of checklist tasks to process (merged or parked) before halting the runner loop.">
+              <div style="display: flex; flex-direction: column;">
+                <span style="font-size: 0.62rem; color: var(--text-white); font-family: var(--font-mono); font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;">BATCH ITEM LIMIT</span>
+                <span style="font-size: 0.55rem; color: var(--text-muted); font-family: var(--font-mono);">Stops loop after N tasks</span>
+              </div>
+              <input type="number" id="run-limit" value="1" min="1" max="500" style="width: 48px; height: 26px; text-align: center; font-weight: bold; padding: 0.1rem 0.2rem;" title="Maximum tasks to process (merged or parked) before halting loop" />
+              <span style="font-size: 0.65rem; color: var(--text-dim); font-family: var(--font-mono); font-weight: 700;">tasks</span>
+            </div>
+            <button id="btn-toggle-run" class="btn-red" onclick="toggleRunner()" style="height: 32px; padding: 0 1rem;">▶ RUN LOOP</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HUD Grid -->
+    <div class="hud-grid">
+      <div class="hud-card accent-red">
+        <div class="hud-label">Inference Rate</div>
+        <div class="hud-graphic-row">
+          <div class="speedometer">
+            <svg viewBox="0 0 100 50">
+              <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-bright)" stroke-width="12" stroke-linecap="round"/>
+              <path id="hud-tps-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--red)" stroke-width="12" stroke-linecap="round" stroke-dasharray="125.66" stroke-dashoffset="125.66" style="transition: stroke-dashoffset 0.5s ease-out;" />
+            </svg>
+          </div>
+          <div class="hud-val" id="hud-tps">{{tokens.tps}} <span style="font-size: 0.9rem; font-weight: 500; color: var(--text-muted);">t/s</span></div>
+        </div>
+        <div class="hud-sub">Peak Speed: <span id="hud-peak-tps" style="color: var(--text-white);">{{tokens.peak_tps}}</span> t/s</div>
+      </div>
+      <div class="hud-card accent-red">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div class="hud-label">Token Volume</div>
+          <span style="font-size: 0.6rem; color: var(--text-dim); font-family: var(--font-mono); text-transform: uppercase;">By Model</span>
+        </div>
+        <div class="hud-val" id="hud-total-tokens">{{tokens.total}}</div>
+        <div class="hud-sub">Prompt: <span id="hud-prompt-tokens">{{tokens.prompt}}</span> | Eval: <span id="hud-comp-tokens">{{tokens.completion}}</span></div>
+        <div id="hud-tokens-models" style="margin-top: 0.45rem; padding-top: 0.45rem; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 0.35rem;">
+          <span style="font-size: 0.62rem; color: var(--text-dim); font-family: var(--font-mono); font-style: italic;">No model usage recorded yet</span>
+        </div>
+      </div>
+      <div class="hud-card accent-red">
+        <div class="hud-label">GPU Memory & Temp</div>
+        <div class="hud-bars">
+          <div class="hud-bar-container">
+            <div class="hud-bar-label">Mem</div>
+            <div class="hud-bar-track"><div class="hud-bar-fill" id="hud-gpu-mem-fill"></div></div>
+            <div id="hud-gpu-mem-text" style="width: 60px; text-align: right;">{{gpu.used_mb}}M</div>
+          </div>
+          <div class="hud-bar-container">
+            <div class="hud-bar-label">Tmp</div>
+            <div class="hud-bar-track"><div class="hud-bar-fill" id="hud-gpu-temp-fill" style="background: var(--red);"></div></div>
+            <div id="hud-gpu-temp-text" style="width: 60px; text-align: right;">{{gpu.temp_c}}°C</div>
+          </div>
+        </div>
+        <div class="hud-sub" style="margin-top: 0.2rem;"><span id="hud-gpu-name">{{gpu.name}}</span></div>
+      </div>
+      <div class="hud-card accent-red">
+        <div class="hud-label">Active Engine</div>
+        <div class="hud-val" style="font-size: 1.15rem; margin-top: 0.25rem;" id="hud-loaded-model">{{ollama.loaded_model}}</div>
+        <div class="hud-sub">Context Buffer: <span id="hud-ctx">{{ollama.context}}</span> tokens</div>
+      </div>
+    </div>
+
+    <!-- Main Workshop Grid -->
+    <div class="studio-grid">
+      <!-- Terminal Console -->
+      <div class="terminal-card">
+        <div class="terminal-header">
+          <span title="Live streaming logs from the Forge autonomous loop">Live Execution Console</span>
+          <div class="terminal-header-actions">
+            <label title="Automatically scroll to bottom on new logs"><input type="checkbox" id="terminal-autoscroll" checked> Auto-scroll</label>
+            <button onclick="document.getElementById('terminal-logs').innerHTML=''">Clear</button>
+          </div>
+        </div>
+        <div class="terminal-body" id="terminal-logs"></div>
+      </div>
+
+      <!-- Right Column: Live Todo Queue & Parked Worktrees -->
+      <aside>
+        <div class="side-card">
+          <div class="side-title">
+            <span>Checklist Queue <span class="queue-counts" id="queue-counts"></span></span>
+            <div style="display: flex; gap: 0.35rem;">
+              <button id="btn-requeue-dash" onclick="requeueStuckItems()" title="Move every [!] / [?] item back to [ ] so the next run retries them" hidden>↺ Requeue</button>
+              <button onclick="showTab('todo')">Full Editor →</button>
+            </div>
+          </div>
+          <div id="dashboard-todo-queue">
+            <div style="font-size: 0.78rem; color: var(--text-dim); text-align: center; padding: 1.5rem 0;">Loading tasks...</div>
+          </div>
+        </div>
+
+        <div class="side-card">
+          <div class="side-title">
+            <span>Parked Branches</span>
+            <button onclick="refreshBranches()">Refresh</button>
+          </div>
+          <div id="branch-list">
+            <div style="font-size: 0.78rem; color: var(--text-dim); text-align: center; padding: 1.5rem 0;">Scanning branches...</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <!-- TAB 2: TODO List & Spec Architect (Editable from Studio) -->
+  <section class="tab-content" id="tab-todo">
+    <div class="todo-studio-header">
+      <div>
+        <div class="todo-meta-title">
+          <span style="color: var(--red);">[FILE]</span>
+          <span id="todo-display-filename">TODO.md</span>
+        </div>
+        <div class="todo-meta-sub" id="todo-display-filepath">Path: loading...</div>
+      </div>
+
+      <div class="todo-view-toggles">
+        <button class="todo-view-btn active" id="viewbtn-checklist" onclick="setTodoView('checklist')">📋 Checklist View</button>
+        <button class="todo-view-btn" id="viewbtn-raw" onclick="setTodoView('raw')">✏️ Raw Markdown</button>
+        <button class="todo-view-btn" id="viewbtn-split" onclick="setTodoView('split')">◫ Split View</button>
+      </div>
+
+      <div style="display: flex; gap: 0.5rem;">
+        <button onclick="openAddTaskModal()">+ Add Task</button>
+        <button onclick="requeueStuckItems()" title="Move every [!] blocked / [?] needs-review item back to [ ] so the next run retries them - e.g. after switching models">↺ Requeue Stuck</button>
+        <button class="btn-red" onclick="saveRawTodo()">💾 Save (Ctrl+S)</button>
+        <button onclick="reloadTodoFromDisk()">🔄 Reload</button>
+      </div>
+    </div>
+
+    <div class="sync-banner" id="todo-sync-banner" hidden>
+      <span id="todo-sync-text"></span>
+      <div style="display: flex; gap: 0.4rem;">
+        <button id="btn-sync-reload" onclick="reloadTodoFromDisk(true)">Discard my edits &amp; reload</button>
+        <button id="btn-sync-overwrite" class="btn-red" onclick="saveRawTodo(true)">Overwrite file with my edits</button>
+      </div>
+    </div>
+
+    <!-- Goal Decomposer Collapsible Drawer -->
+    <div class="goal-drawer">
+      <div class="goal-drawer-title">✨ AI Spec Architect: Goal Decomposition</div>
+      <div class="goal-input-row">
+        <input type="text" id="goal-input" placeholder="e.g. Add ambient clock display and offline status badge to family hub" style="flex: 1;" />
+        <select id="draft-model" title="Model that drafts the checklist items" style="max-width: 220px;"></select>
+        <button class="btn-white" id="btn-draft-goal" onclick="draftGoal()">Draft Tasks with AI</button>
+      </div>
+      <div class="draft-review" id="draft-review" hidden>
+        <div class="editor-toolbar">
+          <span>Drafted items - review before adding (<span id="draft-model-label"></span>)</span>
+          <span id="draft-lint-badge"></span>
+        </div>
+        <div class="split-grid">
+          <textarea id="draft-editor" class="raw-textarea" style="min-height: 260px;"></textarea>
+          <div class="linter-report" id="draft-lint-results"></div>
+        </div>
+        <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.6rem;">
+          <button onclick="lintDraft()">Re-lint</button>
+          <button onclick="discardDraft()">Discard draft</button>
+          <button class="btn-red" onclick="acceptDraft()">Append to checklist</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Todo Views Container -->
+    <div class="todo-views-container">
+      <!-- 1. Interactive Checklist View -->
+      <div class="view-pane active" id="pane-checklist">
+        <div class="checklist-grid" id="checklist-items-container">
+          <!-- Rendered dynamically -->
+        </div>
+      </div>
+
+      <!-- 2. Raw Markdown Editor View -->
+      <div class="view-pane" id="pane-raw">
+        <div class="editor-wrapper">
+          <div class="editor-toolbar">
+            <span>Markdown Source Editor (Press Ctrl+S to save)</span>
+            <span id="editor-line-count" style="color: var(--text-muted);">0 lines</span>
+          </div>
+          <textarea id="raw-todo-editor" class="raw-textarea" placeholder="Checklist markdown..."></textarea>
+        </div>
+      </div>
+
+      <!-- 3. Split View (Raw Editor + Linter) -->
+      <div class="view-pane" id="pane-split">
+        <div class="split-grid">
+          <div class="editor-wrapper">
+            <div class="editor-toolbar">
+              <span>Source (Ctrl+S to save)</span>
+              <button onclick="lintSpecNow()">Lint Rules</button>
+            </div>
+            <textarea id="split-todo-editor" class="raw-textarea" style="min-height: 520px;"></textarea>
+          </div>
+          <div class="editor-wrapper">
+            <div class="editor-toolbar">
+              <span>Deterministic Rule Linter</span>
+              <span id="linter-summary-badge" style="color: var(--text-white);">Valid</span>
+            </div>
+            <div class="linter-report" id="linter-results-split"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TAB 3: Worktrees & Diff Reviewer -->
+  <section class="tab-content" id="tab-worktrees">
+    <div class="reviewer-grid">
+      <div class="side-card" style="min-height: 550px;">
+        <div class="side-title">
+          <span>Parked Worktrees</span>
+          <div style="display: flex; gap: 0.35rem;">
+            <button onclick="discardAllBranches()" title="Delete every parked branch">Discard all</button>
+            <button onclick="refreshBranches()">Refresh</button>
+          </div>
+        </div>
+        <div id="review-branch-list">
+          <div style="font-size: 0.78rem; color: var(--text-dim); text-align: center; padding: 1.5rem 0;">No parked branches found.</div>
+        </div>
+      </div>
+
+      <div class="diff-pane">
+        <div class="terminal-header">
+          <div>
+            <span id="diff-branch-title" style="color: var(--text-white);">Select a branch to review</span>
+            <span id="diff-stat-badge" style="margin-left: 0.6rem; color: var(--red-bright);"></span>
+          </div>
+          <div style="display: flex; gap: 0.5rem;" id="diff-action-buttons">
+            <button id="btn-critic" class="btn-white" onclick="runCritic()" disabled>🤖 Critic Review</button>
+            <button id="btn-merge-active" class="btn-red" onclick="mergeActiveBranch()" disabled>Merge Anyway</button>
+            <button id="btn-discard-active" onclick="discardActiveBranch()" disabled>Discard</button>
+          </div>
+        </div>
+
+        <div id="critic-result-container"></div>
+        <div class="diff-code" id="diff-code-view">Select a parked worktree branch from the left panel to inspect its diff and trigger an automated adversarial code review.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Toasts & modal -->
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-actions" id="modal-actions"></div>
+    </div>
+  </div>
+
+  <!-- Initial State Data Block -->
+  <script id="initial-state-data" type="application/json">
+__INITIAL_STATE__
+  </script>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

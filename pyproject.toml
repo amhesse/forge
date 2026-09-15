@@ -20,6 +20,9 @@ forge = "forge.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+forge = ["studio_static/*"]
+
 # NOTE: the name "forge" collides with the Foundry Ethereum toolchain's
 # `forge` binary, which is common enough on developer machines that it's
 # worth naming here rather than finding out the hard way. Nothing on
