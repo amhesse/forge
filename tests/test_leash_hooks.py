@@ -202,6 +202,7 @@ class LeashHookTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-high")
         for flag in ("--sandbox", "--output-format"):
             self.assertIn(flag, argv)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
         # agy's own 5-minute print timeout must not cut a repair short.
         self.assertEqual(argv[argv.index("--print-timeout") + 1], "1800s")
         rec = self.record()

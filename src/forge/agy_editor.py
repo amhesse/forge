@@ -10,9 +10,23 @@ CLI details that matter here, found by running it rather than assumed:
   flag placed after `--print` is read as the prompt and the real prompt is
   silently dropped (agy exits 2 and says so).
 - `--mode accept-edits` lets it write files without an interactive
-  approval; `--sandbox` restricts its terminal access while still allowing
-  edits. The loop runs the project's validate commands itself, so the
-  agent has no need for a shell.
+  approval; `--sandbox` is *meant* to restrict its terminal access while
+  still allowing edits, but on this machine it never actually initializes
+  ("sbox: installing certificate: open /etc/ssl/cert.pem: read-only file
+  system" on every single invocation) - so it provides no real
+  containment, and must not be paired with anything that also skips
+  permission checks. A model that reaches for a shell (Claude models
+  routed through agy, observed live: it tries to run the tests before
+  replying) gets that command soft-denied in print mode with nobody there
+  to approve it, and then simply ends the turn without ever writing the
+  file it was asked for - logged upstream as "finished but changed
+  nothing", indistinguishable from a model that chose not to change
+  anything. `--dangerously-skip-permissions` was tried as a fix and
+  reverted: with `--sandbox` not actually sandboxing, it let an agent
+  write outside the worktree entirely - confirmed live, twice, writing
+  the task's own reference solution into this project's shared bench
+  fixtures rather than the trial's isolated worktree. Do not re-add it
+  until `--sandbox` is confirmed to actually contain the process.
 - `--output-format json` prints one object: status "SUCCESS" or "ERROR",
   `response`, `error`, `duration_seconds` and `usage` (input, output,
   thinking and cache-read tokens). Errors also exit non-zero.
