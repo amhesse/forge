@@ -17,6 +17,7 @@ from . import worktree as wt
 from .config import (
     CONFIG_FILENAME,
     DEFAULT_MAX_ITEMS,
+    DEFAULT_HARD_VALIDATION_RETRIES,
     DEFAULT_MAX_RETRIES,
     DEFAULT_MAX_VALIDATION_RETRIES,
     DEFAULT_SLEEP_BETWEEN_ITEMS,
@@ -104,6 +105,24 @@ def estimate_difficulty(item_text: str) -> str:
     if extract_exact_content_specs(item_text):
         return DIFFICULTY_EASY
     return DIFFICULTY_HARD
+
+
+def validation_retries_for(args, item_text: str) -> int:
+    """The validation-fix budget for one item.
+
+    Flat --max-validation-retries unless --hard-validation-retries is set,
+    in which case items estimate_difficulty() calls "hard" get the larger
+    budget and everything else is left alone. The asymmetry is the point:
+    an easy item here is one with a byte-exact spec, which is already
+    checked byte-for-byte whether the model retries or not, so extra
+    retries on it cost model time and buy no additional certainty. A hard
+    item is the opposite - its only check is whether the tests actually
+    pass, and that is exactly the check a second look can flip.
+    """
+    budget = getattr(args, "hard_validation_retries", None)
+    if budget is None or estimate_difficulty(item_text) != DIFFICULTY_HARD:
+        return args.max_validation_retries
+    return max(budget, args.max_validation_retries)
 
 
 def is_git_repo(project_dir: Path) -> bool:
@@ -586,6 +605,9 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
         editor_task = repair_prompt(item.text, getattr(args, "repair_note_text", ""))
         log(f"Repair mode: starting from {repair_from}", log_path)
 
+    val_budget = validation_retries_for(args, item.text)
+    record["validation_retry_budget"] = val_budget
+
     # A TDD item's red/green phases can't be replayed on top of an attempt
     # that already wrote the test, so repair takes the single-pass path with
     # both files named; the project's validate commands still run the tests.
@@ -601,7 +623,8 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
         task_text = TDD_PREFIX_RE.sub("", item.text, count=1)
         return run_tdd_phases(project_dir, worktree_path, task_text, test_file, impl_file,
                               base, args, log_path, record, finish, model=model, git_lock=git_lock,
-                              backend_override=backend_override)
+                              backend_override=backend_override,
+                              validation_retries=val_budget)
 
     success = False
     attempt = 0
@@ -671,9 +694,9 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
     valid, validation_msg = validate_syntax(worktree_path, log_path, scope)
 
     validation_attempt = 0
-    while not valid and validation_attempt < args.max_validation_retries:
+    while not valid and validation_attempt < val_budget:
         validation_attempt += 1
-        log(f"Validation failed (retry {validation_attempt}/{args.max_validation_retries}), "
+        log(f"Validation failed (retry {validation_attempt}/{val_budget}), "
             f"asking aider to fix it: {item.text}", log_path)
         fix_success, _, fix_usage = run_editor_on_item(worktree_path, (
             f"The previous change for this task did not pass validation.\n\n"
@@ -866,6 +889,14 @@ def main(argv: list[str] | None = None) -> int:
                               "the original task PLUS the actual validation failure output, asking "
                               "it to fix the failure without abandoning the task. Only after these "
                               "are exhausted does the item get marked blocked and reverted.")
+    parser.add_argument("--hard-validation-retries", default=DEFAULT_HARD_VALIDATION_RETRIES,
+                         type=int,
+                         help="Validation-retry budget for items estimate_difficulty() rates "
+                              "'hard' (TDD items, multi-file items, anything without a byte-exact "
+                              "content spec). Leave unset to use the flat --max-validation-retries "
+                              "for every item. An exact-spec item is checked byte-for-byte whether "
+                              "it retries or not, so this deliberately spends the extra attempts "
+                              "only where the tests passing is the only signal there is.")
     parser.add_argument("--sleep-between", default=DEFAULT_SLEEP_BETWEEN_ITEMS, type=int,
                          help="Seconds to pause between items (Ctrl+C window)")
     parser.add_argument("--stop-on-problem", action="store_true",

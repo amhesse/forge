@@ -20,6 +20,13 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_VALIDATION_RETRIES = 1  # separate from DEFAULT_MAX_RETRIES: this
 # governs "validation failed, ask aider to fix it" retries, not "aider itself
 # crashed" retries - see the validation loop in main().
+# Opt-in, difficulty-gated override for DEFAULT_MAX_VALIDATION_RETRIES.
+# None = disabled, every item uses the flat budget above (the historical
+# behavior). When set, it applies ONLY to items estimate_difficulty()
+# calls "hard" - exact-spec items are already checked byte-for-byte, so
+# spending extra model time re-trying them buys nothing the byte check
+# doesn't already give for free.
+DEFAULT_HARD_VALIDATION_RETRIES = None
 DEFAULT_MAX_ITEMS = None  # None = run until todo.md is empty of open items
 DEFAULT_SLEEP_BETWEEN_ITEMS = 5  # seconds, gives you a window to Ctrl+C
 DEFAULT_MAX_FILE_BYTES = 262144  # 256KB, ~85k tokens of text

@@ -172,3 +172,46 @@ class TestExactContentSpecs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestValidationRetriesFor(unittest.TestCase):
+    """--hard-validation-retries must spend its extra attempts only on
+    items whose sole signal is whether the tests pass. An exact-spec item
+    is checked byte-for-byte either way, so extra retries on it are pure
+    cost."""
+
+    @staticmethod
+    def _args(flat=1, hard=None):
+        import types
+        return types.SimpleNamespace(max_validation_retries=flat,
+                                     hard_validation_retries=hard)
+
+    HARD = "Implement the total() function in book_store.py so the tests pass."
+    EXACT = "Write `config.txt` with exactly this content:\n\n```\nhello\n```\n"
+
+    def test_classifier_assumptions_hold(self):
+        from forge.runner import estimate_difficulty, DIFFICULTY_HARD, DIFFICULTY_EASY
+        self.assertEqual(estimate_difficulty(self.HARD), DIFFICULTY_HARD)
+        self.assertEqual(estimate_difficulty(self.EXACT), DIFFICULTY_EASY)
+
+    def test_disabled_by_default_keeps_flat_budget(self):
+        from forge.runner import validation_retries_for
+        self.assertEqual(validation_retries_for(self._args(), self.HARD), 1)
+        self.assertEqual(validation_retries_for(self._args(), self.EXACT), 1)
+
+    def test_enabled_raises_hard_only(self):
+        from forge.runner import validation_retries_for
+        a = self._args(flat=1, hard=8)
+        self.assertEqual(validation_retries_for(a, self.HARD), 8)
+        self.assertEqual(validation_retries_for(a, self.EXACT), 1)
+
+    def test_never_lowers_an_explicit_flat_budget(self):
+        from forge.runner import validation_retries_for
+        a = self._args(flat=5, hard=2)
+        self.assertEqual(validation_retries_for(a, self.HARD), 5)
+
+    def test_missing_attribute_falls_back(self):
+        import types
+        from forge.runner import validation_retries_for
+        a = types.SimpleNamespace(max_validation_retries=3)
+        self.assertEqual(validation_retries_for(a, self.HARD), 3)

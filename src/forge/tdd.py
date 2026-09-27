@@ -61,7 +61,8 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
                    test_file: str, impl_file: str, base: str, args, log_path: Path,
                    record: dict, finish, model: str | None = None,
                    git_lock: threading.RLock | None = None,
-                   backend_override: str | None = None) -> tuple[str, dict]:
+                   backend_override: str | None = None,
+                   validation_retries: int | None = None) -> tuple[str, dict]:
     """Red, then green: aider writes ONLY the test and that test is
     confirmed to fail for a real reason, then a separate aider call
     implements the feature without being allowed to touch the test again.
@@ -197,11 +198,13 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
     scope = [worktree_path / f for f in touched]
     valid, validation_msg = validate_syntax(worktree_path, log_path, scope)
 
+    val_budget = (args.max_validation_retries if validation_retries is None
+                  else validation_retries)
     validation_attempt = 0
-    while not valid and validation_attempt < args.max_validation_retries:
+    while not valid and validation_attempt < val_budget:
         validation_attempt += 1
         log(f"TDD green phase failed validation (retry {validation_attempt}/"
-            f"{args.max_validation_retries}): {task_text}", log_path)
+            f"{val_budget}): {task_text}", log_path)
         fix_success, _, fix_usage = run_editor_on_item(worktree_path, (
             f"The implementation in `{impl_file}` does not yet make the test in "
             f"`{test_file}` pass.\n\nOriginal task:\n{task_text}\n\n"
