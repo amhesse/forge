@@ -677,11 +677,20 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
                   "disabling the model's thinking mode for this one)" if think_off_next else ""
             log(f"Retry {attempt - 1}/{args.max_retries}{why} for: {item.text}", log_path)
         config.emit_stage(index, item.text, "coding", expected)
+        if think_off_next:
+            # Recorded, not just logged: the log line lives at the head of a
+            # long item log and any consumer keeping a bounded tail of it
+            # (Leash keeps 4000 chars) loses exactly the evidence that this
+            # adaptation happened at all. An adaptation nobody can observe
+            # after the fact is indistinguishable from one that never fired.
+            record["adaptive_think_off_retries"] = \
+                record.get("adaptive_think_off_retries", 0) + 1
         success, last_output, usage = run_editor_on_item(
             worktree_path, editor_task, log_path, files=expected, model=model,
             backend_override=backend_override, force_think_off=think_off_next)
         _accumulate_usage(record, usage, model=model)
         if not success and _truncated_without_output(last_output, usage):
+            record["truncated_attempts"] = record.get("truncated_attempts", 0) + 1
             # Only worth trying if the model actually has a reasoning mode
             # to turn off; otherwise the next attempt is identical anyway.
             think_off_next = lite_editor.is_thinking_model(
