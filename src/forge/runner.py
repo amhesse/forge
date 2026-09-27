@@ -107,6 +107,15 @@ def estimate_difficulty(item_text: str) -> str:
     return DIFFICULTY_HARD
 
 
+def _truncated_without_output(output: str, usage: dict | None) -> bool:
+    """True when the editor hit its output ceiling without ever emitting a
+    usable file block - a diagnosable condition with a known remedy, not a
+    reason to repeat the same call."""
+    if usage is not None and usage.get("done_reason") == "length":
+        return lite_editor.NO_OUTPUT_MARKER in (output or "")
+    return lite_editor.TRUNCATED_MARKER in (output or "")
+
+
 def validation_retries_for(args, item_text: str) -> int:
     """The validation-fix budget for one item.
 
@@ -307,7 +316,8 @@ def _should_fall_back(args, model: str | None) -> bool:
 def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
                        files: list[str] | None = None, model: str | None = None,
                        backend_override: str | None = None,
-                       hard_item: bool | None = None) -> tuple[bool, str, dict]:
+                       hard_item: bool | None = None,
+                       force_think_off: bool = False) -> tuple[bool, str, dict]:
     """Dispatches to whichever editing backend the project asked for.
 
     `[model] backend = "lite"` in .aiderloop.toml (or --backend lite)
@@ -369,6 +379,12 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
                 kwargs["budget_directive"] = True
             if cfg("model", "lite_hard_think_off", default=False):
                 kwargs["think"] = False
+        # Set by the retry loop after an attempt was truncated mid-reasoning
+        # without producing a file block. Applies whatever the item's
+        # difficulty, because at this point it is not a guess about the item
+        # - it is a measured fact about what the last attempt did.
+        if force_think_off:
+            kwargs["think"] = False
         success, output = lite_editor.run_lite_on_item(
             project_dir, item_text, log_path, files=files,
             model=model or cfg("model", "author"), **kwargs)
@@ -646,21 +662,51 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
 
     success = False
     attempt = 0
+    last_output = ""
+    # Set once an attempt has been truncated mid-reasoning without producing
+    # a file block. Retrying that identically is pure waste - measured on
+    # book-store: three attempts, 182s and the full 8000-token budget each,
+    # no file written any time. The remedy is known (stop spending the
+    # budget on a reasoning trace), so the next attempt applies it instead
+    # of repeating the same call and hoping.
+    think_off_next = False
     while attempt <= args.max_retries and not success:
         attempt += 1
         if attempt > 1:
-            log(f"Retry {attempt - 1}/{args.max_retries} for: {item.text}", log_path)
+            why = " (previous attempt was truncated before it wrote a file; " \
+                  "disabling the model's thinking mode for this one)" if think_off_next else ""
+            log(f"Retry {attempt - 1}/{args.max_retries}{why} for: {item.text}", log_path)
         config.emit_stage(index, item.text, "coding", expected)
-        success, _, usage = run_editor_on_item(worktree_path, editor_task, log_path,
-                                               files=expected, model=model,
-                                               backend_override=backend_override)
+        success, last_output, usage = run_editor_on_item(
+            worktree_path, editor_task, log_path, files=expected, model=model,
+            backend_override=backend_override, force_think_off=think_off_next)
         _accumulate_usage(record, usage, model=model)
+        if not success and _truncated_without_output(last_output, usage):
+            # Only worth trying if the model actually has a reasoning mode
+            # to turn off; otherwise the next attempt is identical anyway.
+            think_off_next = lite_editor.is_thinking_model(
+                model or cfg("model", "author") or "")
     record["aider_attempts"] = attempt
 
     if success and getattr(args, "snapshot_first_attempt", False):
         record["first_attempt_commit"] = wt.snapshot_first_attempt(worktree_path, branch)
 
     if not success:
+        # Two different things end up here and they must not read the same.
+        # "The editor produced nothing parseable" is THIS HARNESS failing to
+        # get output it could use - it says nothing about whether the model
+        # was right, careful or uncertain. Reporting it with the same words
+        # as a genuine park makes a harness bug look like the safety net
+        # working, which is exactly how 34 of 120 trials on this project's
+        # own benchmark were misread.
+        if _truncated_without_output(last_output, None) or lite_editor.NO_OUTPUT_MARKER in last_output:
+            record["editor_failure"] = "no_parseable_output"
+            log(f"Editor produced no parseable output after {attempt} attempt(s) - this is a "
+                f"harness failure, not a judgment about the item. Parking: {item.text}", log_path)
+            return finish(STATUS_BLOCKED,
+                          f"editor produced no parseable output after {attempt} attempt(s) "
+                          f"({lite_editor.NO_OUTPUT_MARKER})")
+        record["editor_failure"] = "editor_error"
         log(f"Aider failed after {attempt} attempt(s), parking blocked: {item.text}", log_path)
         return finish(STATUS_BLOCKED, f"aider itself failed after {attempt} attempt(s)")
 
@@ -1027,6 +1073,27 @@ def main(argv: list[str] | None = None) -> int:
     if backend == "aider" and not (project_dir / ".aider.conf.yml").is_file():
         log("Warning: no .aider.conf.yml found in project dir - aider will use "
             "its own defaults, which may not be your local Qwen setup.", log_path)
+
+    # A thinking-capable model spends its reasoning trace from the same
+    # num_predict budget as its answer, so on an open-ended item it can
+    # exhaust the budget mid-thought and never emit a file block at all -
+    # which this loop can only report as a parked item. Measured on
+    # qwen3.8:27b: 34 of 120 trials on an external benchmark, every one of
+    # them looking like the model being careful rather than the harness
+    # losing the output. Nobody should have to know this about their model
+    # to get a usable run, so say it up front. Warn-only: the loop now
+    # detects the truncation and retries with thinking disabled by itself,
+    # and --lite-hard-think-off skips the wasted first attempt entirely.
+    if backend == "lite":
+        author = (args.models.split(",")[0].strip() if getattr(args, "models", None)
+                  else cfg("model", "author"))
+        if author and lite_editor.is_thinking_model(author) \
+                and not cfg("model", "lite_hard_think_off", default=False):
+            log(f"Note: {author} is a thinking-capable model. Its reasoning is spent from the "
+                f"same output budget as the file it writes, so a long-reasoning item can be "
+                f"truncated before any file block is emitted. This loop retries such an attempt "
+                f"with thinking disabled; pass --lite-hard-think-off to skip the wasted attempt.",
+                log_path)
 
     # Now a hard requirement rather than a warning: every item runs in a
     # `git worktree` branched from HEAD, which is also the only thing

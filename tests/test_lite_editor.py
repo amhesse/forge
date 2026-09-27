@@ -181,3 +181,57 @@ class TestHardItemOverrides(unittest.TestCase):
         sig2 = inspect.signature(le.run_lite_on_item)
         self.assertIsNone(sig2.parameters["think"].default)
         self.assertIs(sig2.parameters["budget_directive"].default, False)
+
+
+class TestCapabilityProbe(unittest.TestCase):
+    """A probe that can fail a run is worse than no probe."""
+
+    def setUp(self):
+        le._caps_cache.clear()
+
+    def tearDown(self):
+        le._caps_cache.clear()
+
+    def test_unreachable_server_is_not_an_error(self):
+        self.assertEqual(le.model_capabilities("m", "http://127.0.0.1:1/api/generate"),
+                         frozenset())
+        self.assertFalse(le.is_thinking_model("m", "http://127.0.0.1:1/api/generate"))
+
+    def test_result_is_cached_per_model_and_url(self):
+        le._caps_cache[("m", "u")] = frozenset({"thinking"})
+        self.assertTrue(le.is_thinking_model("m", "u"))
+        self.assertFalse(le.is_thinking_model("other", "u"))
+
+    def test_show_url_derived_from_generate_url(self):
+        calls = []
+        real = le.urllib.request.urlopen
+
+        class FakeResp:
+            def read(self): return b'{"capabilities":["thinking","tools"]}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake(req, timeout=None):
+            calls.append(req.full_url)
+            return FakeResp()
+
+        le.urllib.request.urlopen = fake
+        try:
+            caps = le.model_capabilities("m", "http://h:11434/api/generate")
+        finally:
+            le.urllib.request.urlopen = real
+        self.assertEqual(calls, ["http://h:11434/api/show"])
+        self.assertIn("thinking", caps)
+
+
+class TestNoOutputMarkers(unittest.TestCase):
+    """The harness losing the output must never read like the model being
+    careful - that conflation made a harness bug look like the safety net
+    working on 34 of 120 trials."""
+
+    def test_markers_are_stable_strings(self):
+        self.assertIn("no parseable file block", le.NO_OUTPUT_MARKER)
+        self.assertIn("truncated", le.TRUNCATED_MARKER)
+
+    def test_usage_carries_done_reason(self):
+        self.assertIn("done_reason", le.last_usage())

@@ -86,7 +86,8 @@ def last_usage() -> dict:
     failed before Ollama returned its final chunk. Real usage from
     Ollama's own response, not an estimate - `prompt_eval_count` and
     `eval_count` on the final streamed chunk."""
-    return getattr(_usage_local, "usage", {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0})
+    return getattr(_usage_local, "usage", {"prompt_tokens": 0, "completion_tokens": 0,
+                                           "seconds": 0.0, "done_reason": None})
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 DEFAULT_NUM_CTX = 32768
@@ -171,6 +172,53 @@ as wrong, discarded, as if you had said nothing.
 - If something needs qualifying, put it in a code comment inside the
   file, not in prose outside the block.
 """
+
+
+# Prefixes the failure message when the model produced output but none of
+# it was a usable file block. Deliberately stable and greppable: this is
+# the one failure that is the HARNESS's, not the model's judgment, and
+# anything summarising a run needs to be able to tell the two apart rather
+# than count both as the item being honestly parked.
+NO_OUTPUT_MARKER = "lite_editor produced no parseable file block"
+TRUNCATED_MARKER = "output was truncated at num_predict"
+
+
+_caps_cache: dict[tuple[str, str], frozenset[str]] = {}
+
+
+def model_capabilities(model: str, url: str = DEFAULT_OLLAMA_URL) -> frozenset[str]:
+    """What Ollama says the model can do, e.g. "thinking", "tools", "vision".
+
+    Exists because a thinking-capable model spends its reasoning trace from
+    the same num_predict budget as its answer, which this harness has been
+    measured to lose an entire item to (see OUTPUT_BUDGET_DIRECTIVE). That
+    is not something a user should have to know about their model, so it is
+    detected rather than configured.
+
+    Never raises and never blocks a run: an older Ollama, a model the
+    server does not know, or no server at all all return an empty set,
+    which reads as "no special handling" - exactly the behaviour every
+    project had before this existed.
+    """
+    key = (model, url)
+    if key in _caps_cache:
+        return _caps_cache[key]
+    show_url = url.rsplit("/api/", 1)[0] + "/api/show"
+    caps: frozenset[str] = frozenset()
+    try:
+        req = urllib.request.Request(
+            show_url, data=json.dumps({"model": model}).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            caps = frozenset(json.loads(resp.read()).get("capabilities") or ())
+    except Exception:  # noqa: BLE001 - a probe must never fail a run
+        caps = frozenset()
+    _caps_cache[key] = caps
+    return caps
+
+
+def is_thinking_model(model: str, url: str = DEFAULT_OLLAMA_URL) -> bool:
+    return "thinking" in model_capabilities(model, url)
 
 
 def _log(msg: str, log_path: Path | None) -> None:
@@ -353,7 +401,8 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
     payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     chunks = []
-    _usage_local.usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
+    _usage_local.usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0,
+                          "done_reason": None}
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             for line in resp:
@@ -375,6 +424,13 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
                         "prompt_tokens": obj.get("prompt_eval_count", 0),
                         "completion_tokens": obj.get("eval_count", 0),
                         "seconds": obj.get("total_duration", 0) / 1e9,
+                        # Kept so the caller can tell a model that stopped
+                        # because it was finished from one that stopped
+                        # because it ran out of room. Retrying those two
+                        # identically is how an item burns its whole budget
+                        # producing nothing (measured: 3 x 182s on
+                        # book-store, no file written either time).
+                        "done_reason": obj.get("done_reason"),
                     }
                     break
     except urllib.error.URLError as e:
@@ -453,8 +509,10 @@ def run_lite_on_item(project_dir: Path, item_text: str, log_path: Path,
     _log(f"[lite_editor] requesting {files} from {model}", log_path)
     raw = call_ollama(model, prompt, ollama_url, num_ctx, num_predict, timeout, log_path,
                       think=think)
+    done_reason = last_usage().get("done_reason")
+    truncated = done_reason == "length"
     if not raw.strip():
-        return False, "model returned nothing"
+        return False, f"{NO_OUTPUT_MARKER}: model returned nothing"
 
     blocks = parse_file_blocks(raw)
     in_scope = {path: content for path, content in blocks.items() if path in files}
@@ -462,8 +520,11 @@ def run_lite_on_item(project_dir: Path, item_text: str, log_path: Path,
     if out_of_scope:
         _log(f"[lite_editor] ignored block(s) for file(s) not in scope: {out_of_scope}", log_path)
     if not in_scope:
-        _log(f"[lite_editor] no ===FILE:=== block matched any of {files}. Raw output:\n{raw[:2000]}", log_path)
-        return False, f"no parseable block for any of {files}\n\nraw output:\n{raw[:4000]}"
+        why = f" ({TRUNCATED_MARKER}={num_predict})" if truncated else ""
+        _log(f"[lite_editor] {NO_OUTPUT_MARKER}{why}: nothing matched any of {files}. "
+             f"Raw output:\n{raw[:2000]}", log_path)
+        return False, (f"{NO_OUTPUT_MARKER}{why} for any of {files}"
+                       f"\n\nraw output:\n{raw[:4000]}")
 
     written = []
     for path, content in in_scope.items():

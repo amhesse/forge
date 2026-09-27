@@ -215,3 +215,42 @@ class TestValidationRetriesFor(unittest.TestCase):
         from forge.runner import validation_retries_for
         a = types.SimpleNamespace(max_validation_retries=3)
         self.assertEqual(validation_retries_for(a, self.HARD), 3)
+
+
+class TestTruncatedWithoutOutput(unittest.TestCase):
+    """Drives both the adaptive retry and the distinct park reason, so it
+    has to tell three cases apart: truncated with nothing usable, a clean
+    stop with nothing usable, and an ordinary editor error."""
+
+    def _fn(self):
+        from forge.runner import _truncated_without_output
+        return _truncated_without_output
+
+    def _markers(self):
+        from forge import lite_editor as le
+        return le.NO_OUTPUT_MARKER, le.TRUNCATED_MARKER
+
+    def test_truncated_with_no_block_is_detected_from_usage(self):
+        no_out, _ = self._markers()
+        self.assertTrue(self._fn()(f"{no_out} for any of ['x.py']",
+                                   {"done_reason": "length"}))
+
+    def test_clean_stop_with_no_block_is_not_a_truncation(self):
+        no_out, _ = self._markers()
+        self.assertFalse(self._fn()(f"{no_out} for any of ['x.py']",
+                                    {"done_reason": "stop"}))
+
+    def test_ordinary_editor_error_is_neither(self):
+        self.assertFalse(self._fn()("git commit failed: nope", {"done_reason": "stop"}))
+        self.assertFalse(self._fn()("git commit failed: nope", None))
+
+    def test_message_alone_is_enough_when_usage_is_gone(self):
+        # The park-reason path runs after the loop, where the usage dict of
+        # the failing attempt is no longer in hand.
+        no_out, trunc = self._markers()
+        self.assertTrue(self._fn()(f"{no_out} ({trunc}=8000) for any of ['x.py']", None))
+
+    def test_empty_and_none_output_are_safe(self):
+        self.assertFalse(self._fn()("", None))
+        self.assertFalse(self._fn()(None, None))
+        self.assertFalse(self._fn()(None, {"done_reason": "length"}))
