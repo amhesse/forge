@@ -148,6 +148,31 @@ Rules:
 """
 
 
+# Appended to the prompt only for items the caller flags as hard, and
+# only when a project opts in. Measured on the polyglot-subset benchmark
+# (Leash Phase 4, qwen3.8:27b): on book-store the model spent all 8000
+# num_predict tokens reasoning through candidate algorithms out loud and
+# never emitted a ===FILE:=== marker at all - 15 trials out of 15,
+# done_reason="length" every time, so run_lite_on_item saw "no parseable
+# block" and the item parked without a single line of code ever being
+# written. The directive is deliberately the OPPOSITE of "think harder":
+# the failure is not too little reasoning, it is reasoning that never
+# terminates into output.
+OUTPUT_BUDGET_DIRECTIVE = """\
+### Output budget - read this before you begin
+
+Your output length is capped. Reasoning that runs past the cap means the
+file is never written and the entire attempt is discarded - not graded
+as wrong, discarded, as if you had said nothing.
+
+- Write the ===FILE:=== block FIRST, before any discussion.
+- Do not compare alternative approaches in your output. Pick the one you
+  are most confident in and implement it.
+- If something needs qualifying, put it in a code comment inside the
+  file, not in prose outside the block.
+"""
+
+
 def _log(msg: str, log_path: Path | None) -> None:
     line = f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line, flush=True)
@@ -283,8 +308,11 @@ def find_import_context(project_dir: Path, files: list[str], item_text: str = ""
 
 
 def build_prompt(project_dir: Path, item_text: str, files: list[str],
-                 context: dict[str, str] | None = None) -> str:
+                 context: dict[str, str] | None = None,
+                 budget_directive: bool = False) -> str:
     parts = [SYSTEM_PREAMBLE]
+    if budget_directive:
+        parts.append(OUTPUT_BUDGET_DIRECTIVE)
     for f in files:
         p = project_dir / f
         if p.is_file():
@@ -304,15 +332,25 @@ def build_prompt(project_dir: Path, item_text: str, files: list[str],
 
 
 def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: int,
-                timeout: int, log_path: Path | None) -> str:
+                timeout: int, log_path: Path | None, think: bool | None = None) -> str:
     """Streamed for the same reason spec_compiler.py streams: a
     non-streaming call to a model that reasons in plain prose produces
     zero visible output until it finishes or the socket times out,
     indistinguishable from a hang."""
-    payload = json.dumps({
+    body = {
         "model": model, "prompt": prompt, "stream": True,
         "options": {"num_ctx": num_ctx, "num_predict": num_predict},
-    }).encode("utf-8")
+    }
+    # On a thinking-capable model the reasoning trace is spent from the
+    # same num_predict budget as the answer, so an open-ended item can
+    # exhaust the budget mid-thought and emit no ===FILE:=== block at
+    # all. Measured on book-store (polyglot-subset, qwen3.8:27b): 8000
+    # tokens and 16000 tokens both ended done_reason="length" with no
+    # marker written, so this is not a budget that can simply be raised.
+    # Left as None (the model's own default) unless a caller asks.
+    if think is not None:
+        body["think"] = think
+    payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     chunks = []
     _usage_local.usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
@@ -382,8 +420,9 @@ def parse_file_blocks(raw: str) -> dict[str, str]:
 def run_lite_on_item(project_dir: Path, item_text: str, log_path: Path,
                      files: list[str] | None = None, model: str | None = None,
                      ollama_url: str = DEFAULT_OLLAMA_URL, num_ctx: int = DEFAULT_NUM_CTX,
-                     num_predict: int = DEFAULT_NUM_PREDICT, timeout: int = DEFAULT_TIMEOUT
-                     ) -> tuple[bool, str]:
+                     num_predict: int = DEFAULT_NUM_PREDICT, timeout: int = DEFAULT_TIMEOUT,
+                     budget_directive: bool = False,
+                     think: bool | None = None) -> tuple[bool, str]:
     """Drop-in alternative to aider_loop.run_aider_on_item - same
     signature, same (success, output) return shape, so aider_loop's
     process_item can call either one interchangeably based on config.
@@ -407,11 +446,13 @@ def run_lite_on_item(project_dir: Path, item_text: str, log_path: Path,
         return False, "lite_editor requires an explicit model"
 
     context = find_import_context(project_dir, files, item_text=item_text)
-    prompt = build_prompt(project_dir, item_text, files, context=context)
+    prompt = build_prompt(project_dir, item_text, files, context=context,
+                          budget_directive=budget_directive)
     if context:
         _log(f"[lite_editor] read-only context from imports: {list(context)}", log_path)
     _log(f"[lite_editor] requesting {files} from {model}", log_path)
-    raw = call_ollama(model, prompt, ollama_url, num_ctx, num_predict, timeout, log_path)
+    raw = call_ollama(model, prompt, ollama_url, num_ctx, num_predict, timeout, log_path,
+                      think=think)
     if not raw.strip():
         return False, "model returned nothing"
 

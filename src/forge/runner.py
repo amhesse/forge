@@ -306,7 +306,8 @@ def _should_fall_back(args, model: str | None) -> bool:
 
 def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
                        files: list[str] | None = None, model: str | None = None,
-                       backend_override: str | None = None) -> tuple[bool, str, dict]:
+                       backend_override: str | None = None,
+                       hard_item: bool | None = None) -> tuple[bool, str, dict]:
     """Dispatches to whichever editing backend the project asked for.
 
     `[model] backend = "lite"` in .aiderloop.toml (or --backend lite)
@@ -351,6 +352,23 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
         num_predict = cfg("model", "lite_num_predict", default=None)
         if num_predict:
             kwargs["num_predict"] = num_predict
+        # Hard-item overrides. Both exist because of one measured failure
+        # (see lite_editor.OUTPUT_BUDGET_DIRECTIVE): on an open-ended
+        # algorithmic item the model can spend the whole budget reasoning
+        # and emit no file block at all. They are deliberately scoped to
+        # hard items - an exact-spec item transcribes rather than decides,
+        # which is the case this harness is already reliable on, and there
+        # is no reason to spend more tokens or change its prompt.
+        if hard_item is None:
+            hard_item = estimate_difficulty(item_text) == DIFFICULTY_HARD
+        if hard_item:
+            hard_np = cfg("model", "lite_hard_num_predict", default=None)
+            if hard_np:
+                kwargs["num_predict"] = hard_np
+            if cfg("model", "lite_hard_budget_directive", default=False):
+                kwargs["budget_directive"] = True
+            if cfg("model", "lite_hard_think_off", default=False):
+                kwargs["think"] = False
         success, output = lite_editor.run_lite_on_item(
             project_dir, item_text, log_path, files=files,
             model=model or cfg("model", "author"), **kwargs)
@@ -897,6 +915,21 @@ def main(argv: list[str] | None = None) -> int:
                               "for every item. An exact-spec item is checked byte-for-byte whether "
                               "it retries or not, so this deliberately spends the extra attempts "
                               "only where the tests passing is the only signal there is.")
+    parser.add_argument("--lite-hard-num-predict", default=None, type=int,
+                         help="lite backend only: num_predict for items estimate_difficulty() "
+                              "rates 'hard', overriding [model] lite_num_predict for those items. "
+                              "An open-ended item can spend the whole default budget reasoning and "
+                              "never emit a file block at all; this buys it room to finish.")
+    parser.add_argument("--lite-hard-think-off", action="store_true",
+                         help="lite backend only: disable the model's thinking mode on hard items. "
+                              "On a thinking-capable model the reasoning trace is spent from the "
+                              "same num_predict budget as the answer, so an open-ended item can "
+                              "burn the whole budget reasoning and emit no file block at all.")
+    parser.add_argument("--lite-hard-budget-directive", action="store_true",
+                         help="lite backend only: prepend an output-budget directive to hard items, "
+                              "telling the model to emit the file block first and not to weigh "
+                              "alternatives in its output. Counterpart to --lite-hard-num-predict: "
+                              "that one raises the ceiling, this one lowers the demand.")
     parser.add_argument("--sleep-between", default=DEFAULT_SLEEP_BETWEEN_ITEMS, type=int,
                          help="Seconds to pause between items (Ctrl+C window)")
     parser.add_argument("--stop-on-problem", action="store_true",
@@ -974,6 +1007,12 @@ def main(argv: list[str] | None = None) -> int:
         # than threaded through every call site, since run_editor_on_item
         # reads it from there anyway.
         config.CONFIG.setdefault("model", {})["backend"] = args.backend
+    if args.lite_hard_num_predict:
+        config.CONFIG.setdefault("model", {})["lite_hard_num_predict"] = args.lite_hard_num_predict
+    if args.lite_hard_budget_directive:
+        config.CONFIG.setdefault("model", {})["lite_hard_budget_directive"] = True
+    if args.lite_hard_think_off:
+        config.CONFIG.setdefault("model", {})["lite_hard_think_off"] = True
     todo_path = project_dir / args.todo_file
     log_path = project_dir / "aider_loop.log"
 

@@ -143,3 +143,41 @@ class TestFindImportContext(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHardItemOverrides(unittest.TestCase):
+    """The hard-item knobs must be inert unless asked for: every result
+    produced before they existed has to reproduce with the same command."""
+
+    def _files(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        (Path(d) / "x.py").write_text("def f():\n    pass\n")
+        return Path(d)
+
+    def test_directive_absent_by_default(self):
+        d = self._files()
+        p = le.build_prompt(d, "do a thing", ["x.py"])
+        self.assertNotIn("Output budget", p)
+
+    def test_directive_present_when_requested(self):
+        d = self._files()
+        p = le.build_prompt(d, "do a thing", ["x.py"], budget_directive=True)
+        self.assertIn("Output budget", p)
+        # It must constrain deliberation, not invite it - the measured
+        # failure is reasoning that never terminates into a file block.
+        self.assertIn("===FILE:=== block FIRST", p)
+
+    def test_directive_does_not_displace_the_protocol(self):
+        d = self._files()
+        p = le.build_prompt(d, "do a thing", ["x.py"], budget_directive=True)
+        self.assertIn("===FILE: relative/path/to/file.ext===", p)
+        self.assertIn("x.py", p)
+
+    def test_think_is_omitted_from_payload_unless_set(self):
+        import inspect
+        sig = inspect.signature(le.call_ollama)
+        self.assertIsNone(sig.parameters["think"].default)
+        sig2 = inspect.signature(le.run_lite_on_item)
+        self.assertIsNone(sig2.parameters["think"].default)
+        self.assertIs(sig2.parameters["budget_directive"].default, False)
