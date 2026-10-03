@@ -144,3 +144,45 @@ class TestRunnerModule(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClaudeEnvGuard(unittest.TestCase):
+    """The credential strip exists so escalation can never become a
+    per-token bill. The loopback exception must not widen that hole: a
+    host merely *containing* a loopback-looking string is someone else's
+    machine and must still get nothing."""
+
+    def setUp(self):
+        from forge import claude_editor
+        self.ce = claude_editor
+
+    def _env_with(self, base):
+        import os
+        from unittest import mock
+        fake = {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_AUTH_TOKEN": "t"}
+        if base is not None:
+            fake["ANTHROPIC_BASE_URL"] = base
+        with mock.patch.dict(os.environ, fake, clear=True):
+            return self.ce._env()
+
+    def test_loopback_hosts_are_local(self):
+        for url in ("http://127.0.0.1:8080", "http://localhost:8080",
+                    "http://[::1]:8080", "http://127.2.3.4"):
+            self.assertTrue(self.ce._is_loopback_endpoint(url), url)
+
+    def test_lookalike_host_is_not_local(self):
+        # The host here is example.com's; a substring test would leak to it.
+        for url in ("http://127.0.0.1.example.com/", "http://localhost.evil.com/",
+                    "https://api.anthropic.com", "http://10.0.0.5:8080",
+                    "", "not a url"):
+            self.assertFalse(self.ce._is_loopback_endpoint(url), url)
+
+    def test_credentials_kept_only_for_a_local_endpoint(self):
+        env = self._env_with("http://127.0.0.1:8080")
+        self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "t")
+
+    def test_credentials_stripped_for_a_remote_endpoint(self):
+        for base in ("https://api.anthropic.com", "http://127.0.0.1.example.com/", None):
+            env = self._env_with(base)
+            self.assertIsNone(env.get("ANTHROPIC_API_KEY"), base)
+            self.assertIsNone(env.get("ANTHROPIC_AUTH_TOKEN"), base)

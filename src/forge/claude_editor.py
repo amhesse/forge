@@ -13,9 +13,11 @@ can never turn into a per-token bill. It still counts against the
 plan's usage limits, which is why this is an escalation path and not
 the workhorse.
 """
+import ipaddress
 import json
 import os
 import subprocess
+import urllib.parse
 from pathlib import Path
 
 CLAUDE_BIN = "claude"
@@ -33,8 +35,50 @@ def last_usage() -> dict:
     return dict(_last_usage)
 
 
+def _is_loopback_endpoint(url: str) -> bool:
+    """True only for a base URL whose host is this machine.
+
+    Parsed rather than pattern-matched on purpose: the host of
+    "http://127.0.0.1.example.com/" is example.com's, not ours, and a
+    substring test for "127.0.0.1" would hand it the credentials this
+    function exists to withhold.
+    """
+    if not url:
+        return False
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _env() -> dict:
+    """The child's environment, with API credentials removed.
+
+    The exception is a base URL pointing at this machine - a local
+    OpenAI/Anthropic-compatible server such as Strata. The CLI needs a
+    token to talk to one at all, and there is no metered API behind it to
+    bill, so stripping the token there only breaks the call without
+    protecting anything. Anything not demonstrably loopback keeps the
+    original behaviour: no credentials, so escalation cannot become a
+    per-token bill.
+
+    Note for anyone reading usage numbers from this path: the CLI prices
+    its own reported usage from the model NAME, so a local endpoint still
+    reports a non-zero total_cost_usd. Measured against Strata: 31k
+    prompt tokens "cost" $0.09 while nothing was billed. Treat cost from
+    this backend as meaningless whenever the base URL is local.
+    """
     env = dict(os.environ)
+    if _is_loopback_endpoint(env.get("ANTHROPIC_BASE_URL", "")):
+        return env
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
     return env
