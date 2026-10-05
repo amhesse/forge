@@ -113,7 +113,14 @@ def emit_tokens(prompt_tokens: int, completion_tokens: int, seconds: float = 0.0
             pass
 
 
+# Text that must never reach a log line: the --doer-preamble, which some
+# backends would otherwise echo as part of the prompt they log.
+REDACT: tuple[str, ...] = ()
+
+
 def log(msg: str, log_path: Path | None = None) -> None:
+    for secret in REDACT:
+        msg = msg.replace(secret, "[doer preamble]")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
     with _log_lock:

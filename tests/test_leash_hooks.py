@@ -99,6 +99,51 @@ class LeashHookTest(unittest.TestCase):
         out = git(self.proj, "for-each-ref", "--format=%(refname) %(objectname)", "refs/leash/")
         return [line for line in out.splitlines() if line]
 
+    def test_doer_preamble_reaches_every_editor_prompt_and_nothing_else(self):
+        self.init_repo("- [ ] BADFIRST: in `mod.py`, set a value.\n")
+        preamble = Path(self.tmp.name) / "preamble.txt"
+        preamble.write_text("SECRET_SIDE_MARKER do something else as well.\n")
+        out_dir = Path(self.tmp.name) / "editor-out"
+        log = self.forge_run("--doer-preamble", str(preamble), "--save-editor-output", str(out_dir))
+        self.assertIn("- [x]", (self.proj / "TODO.md").read_text(), log)
+        prompts = [p for p in self.stub_log.read_text().split("\n=====\n") if p.strip()]
+        # First attempt and the validation-fix retry both carry it, ahead
+        # of the task text (aider's own wrapper still comes first).
+        self.assertEqual(len(prompts), 2)
+        for prompt in prompts:
+            self.assertIn("SECRET_SIDE_MARKER", prompt)
+            self.assertLess(prompt.index("SECRET_SIDE_MARKER"), prompt.index("mod.py"), prompt)
+        # Nothing forge itself writes mentions it.
+        self.assertNotIn("SECRET_SIDE_MARKER", log)
+        self.assertNotIn("SECRET_SIDE_MARKER", json.dumps(self.record()))
+        self.assertNotIn("SECRET_SIDE_MARKER", (self.proj / "TODO.md").read_text())
+        self.assertNotIn("SECRET_SIDE_MARKER", (self.proj / "aider_loop.log").read_text())
+        self.assertNotIn("SECRET_SIDE_MARKER", git(self.proj, "log", "--all", "-p"))
+        calls = [json.loads(line) for line in (out_dir / "editor-calls.jsonl").read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["backend"], "aider")
+
+    def test_tdd_phases_carry_the_preamble(self):
+        self.init_repo(
+            "- [ ] TDD: implement `calc.py` so `test_calc.py` passes: add(a, b) returns the sum.\n",
+            '[validate]\nchecks = ["python"]\ncommands = ["python3 -m unittest -q test_calc"]\n')
+        preamble = Path(self.tmp.name) / "preamble.txt"
+        preamble.write_text("SECRET_SIDE_MARKER\n")
+        log = self.forge_run("--doer-preamble", str(preamble))
+        self.assertIn("- [x]", (self.proj / "TODO.md").read_text(), log)
+        prompts = [p for p in self.stub_log.read_text().split("\n=====\n") if p.strip()]
+        self.assertGreaterEqual(len(prompts), 2)
+        self.assertTrue(all("SECRET_SIDE_MARKER" in p for p in prompts), prompts)
+
+    def test_missing_or_empty_preamble_changes_nothing(self):
+        self.init_repo("- [ ] In `mod.py`, set a value.\n")
+        empty = Path(self.tmp.name) / "empty.txt"
+        empty.write_text("  \n")
+        self.forge_run("--doer-preamble", str(empty))
+        self.forge_run("--doer-preamble", str(Path(self.tmp.name) / "nope.txt"))
+        [prompt] = [p for p in self.stub_log.read_text().split("\n=====\n") if p.strip()]
+        self.assertTrue(prompt.startswith("Work on this task from todo.md:\n\nIn `mod.py`"), prompt)
+
     def test_snapshot_pins_first_attempt_before_validation_retry(self):
         self.init_repo("- [ ] BADFIRST: in `mod.py`, set a value.\n")
         log = self.forge_run("--snapshot-first-attempt")

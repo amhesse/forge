@@ -89,6 +89,14 @@ def last_usage() -> dict:
     return getattr(_usage_local, "usage", {"prompt_tokens": 0, "completion_tokens": 0,
                                            "seconds": 0.0, "done_reason": None})
 
+
+def last_thinking() -> str:
+    """The reasoning trace of the most recent call_ollama() on this thread
+    ("" for a model without one). Never part of the output this harness
+    parses - kept only so a run can record what the model thought, for
+    `forge run --save-editor-output`."""
+    return getattr(_usage_local, "thinking", "")
+
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 DEFAULT_NUM_CTX = 32768
 DEFAULT_NUM_PREDICT = 8000  # a rewritten file plus reasoning; bounded for
@@ -401,6 +409,8 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
     payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     chunks = []
+    thinking = []
+    _usage_local.thinking = ""
     _usage_local.usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0,
                           "done_reason": None}
     try:
@@ -411,6 +421,7 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
                 obj = json.loads(line)
                 piece = obj.get("response", "")
                 chunks.append(piece)
+                thinking.append(obj.get("thinking") or "")
                 if VERBOSE:
                     print(piece, end="", flush=True)
                 if obj.get("done"):
@@ -436,6 +447,8 @@ def call_ollama(model: str, prompt: str, url: str, num_ctx: int, num_predict: in
     except urllib.error.URLError as e:
         _log(f"[lite_editor] could not reach ollama at {url}: {e}", log_path)
         return ""
+    finally:
+        _usage_local.thinking = "".join(thinking)
     print()
     return "".join(chunks)
 

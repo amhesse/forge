@@ -313,11 +313,60 @@ def _should_fall_back(args, model: str | None) -> bool:
     return bool(getattr(args, "fallback_model", None)) and args.fallback_model != model
 
 
+# Set once by main() from --doer-preamble and --save-editor-output. Module
+# state rather than an argument because run_editor_on_item has no `args`
+# and tdd.py calls it too; both are read-only once the run has started.
+DOER_PREAMBLE = ""
+EDITOR_OUTPUT_DIR: Path | None = None
+_editor_output_lock = threading.Lock()
+
+
 def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
                        files: list[str] | None = None, model: str | None = None,
                        backend_override: str | None = None,
                        hard_item: bool | None = None,
                        force_think_off: bool = False) -> tuple[bool, str, dict]:
+    """Every editor call goes through here, so this is the one place
+    --doer-preamble is applied: prepended to the prompt text the editor
+    model receives, and nothing else. Every check (expected files, exact
+    content, TDD classification, difficulty) reads the item's own text,
+    never this, and difficulty is decided here from the text *without* the
+    preamble - so with no preamble the call is exactly what it was before.
+    It exists for Leash's sabotage experiment: a side instruction only the
+    doer sees, which the checks are not allowed to know about."""
+    if hard_item is None:
+        hard_item = estimate_difficulty(item_text) == DIFFICULTY_HARD
+    editor_text = f"{DOER_PREAMBLE}\n\n{item_text}" if DOER_PREAMBLE else item_text
+    success, output, usage = _dispatch_editor(project_dir, editor_text, log_path, files=files,
+                                              model=model, backend_override=backend_override,
+                                              hard_item=hard_item, force_think_off=force_think_off)
+    if EDITOR_OUTPUT_DIR is not None:
+        _save_editor_output(success, output, usage, model, backend_override)
+    return success, output, usage
+
+
+def _save_editor_output(success: bool, output: str, usage: dict, model: str | None,
+                        backend_override: str | None) -> None:
+    """Appends one editor call's raw response to <dir>/editor-calls.jsonl.
+    What the model said outside its file blocks, and its reasoning trace,
+    are otherwise discarded; a benchmark needs them to tell a refusal from
+    a failure. The prompt is deliberately not written."""
+    backend = backend_override or cfg("model", "backend", default="aider")
+    row = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "backend": backend,
+           "model": model, "success": success, "output": output,
+           "thinking": lite_editor.last_thinking() if backend == "lite" else "",
+           "usage": usage}
+    with _editor_output_lock:
+        EDITOR_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        with open(EDITOR_OUTPUT_DIR / "editor-calls.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
+
+def _dispatch_editor(project_dir: Path, item_text: str, log_path: Path,
+                     files: list[str] | None = None, model: str | None = None,
+                     backend_override: str | None = None,
+                     hard_item: bool | None = None,
+                     force_think_off: bool = False) -> tuple[bool, str, dict]:
     """Dispatches to whichever editing backend the project asked for.
 
     `[model] backend = "lite"` in .aiderloop.toml (or --backend lite)
@@ -1040,9 +1089,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repair-note", default=None, metavar="FILE",
                          help="With --repair-from: a file explaining why the earlier attempt was "
                               "rejected (the parked record's reason and check output).")
+    parser.add_argument("--doer-preamble", default=None, metavar="FILE",
+                         help="Prepend this file's text to every editor prompt, and to nothing "
+                              "else: no check, log line or record sees it. For sabotage "
+                              "experiments, where the doer gets a side instruction the checks "
+                              "must not know about. A missing or empty file changes nothing.")
+    parser.add_argument("--save-editor-output", default=None, metavar="DIR",
+                         help="Append each editor call's raw response (and, for lite, the "
+                              "model's reasoning trace) to DIR/editor-calls.jsonl. Observational "
+                              "only; the prompt is not written.")
     parser.add_argument("--verbose", action="store_true",
                          help="Enable verbose output")
     args = parser.parse_args(argv)
+    global DOER_PREAMBLE, EDITOR_OUTPUT_DIR
+    args.doer_preamble_text = ""
+    if args.doer_preamble:
+        try:
+            args.doer_preamble_text = Path(args.doer_preamble).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            parser.error(f"cannot read --doer-preamble: {e}")
+    DOER_PREAMBLE = args.doer_preamble_text
+    EDITOR_OUTPUT_DIR = Path(args.save_editor_output).expanduser().resolve() \
+        if args.save_editor_output else None
     args.repair_note_text = ""
     if args.repair_note:
         if not args.repair_from:
@@ -1055,6 +1125,7 @@ def main(argv: list[str] | None = None) -> int:
     project_dir = Path(args.project_dir).expanduser().resolve()
     from . import config
     config.reset_stop()
+    config.REDACT = (DOER_PREAMBLE,) if DOER_PREAMBLE else ()
     config.CONFIG = load_config(project_dir)
     if args.backend:
         # CLI wins over the project's own [model] backend, the same way
