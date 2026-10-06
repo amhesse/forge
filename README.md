@@ -67,6 +67,13 @@ item per line. Name the files and say exactly what you want:
 
     - [ ] In `app/text.py`, add `slugify(text: str) -> str` that lowercases, replaces runs of non-alphanumerics with "-", and strips leading/trailing "-".
 
+Tell forge how to run your tests, in `.aiderloop.toml` in the project.
+Without this it can only syntax-check the work, and "verified" means
+little:
+
+    [validate]
+    commands = ["python -m pytest -q"]
+
 Then run it, and later look at anything it parked:
 
     forge run --project-dir . --todo-file TODO.md --backend lite --models qwen3-coder:30b
