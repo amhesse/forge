@@ -35,9 +35,13 @@ sees:
 | forge, default settings (120 runs) | 20% | **0%** | 80% |
 | forge, tuned (80 runs) | 86% | **0%** | 14% |
 
-- **aider never once gave up.** Across 750 runs (this benchmark plus 14
-  internal tasks on three models), every failure was reported as a
-  success. forge's failures are parked instead.
+- **aider never once signalled a failure.** Across 750 runs (this
+  benchmark plus 14 internal tasks on three models), the `aider` command
+  exited successfully every time, including every run where the work was
+  wrong, so a script running it unattended had no way to tell. On this
+  benchmark most of those runs ended with the model cut off mid-reasoning
+  before it produced a working edit. forge detects that case and parks or
+  retries it.
 - **"Tuned"** means two flags: `--lite-hard-think-off
   --hard-validation-retries 5`. The tuning was done on forge, while aider
   ran at its defaults; a like-for-like comparison with aider tuned too is
