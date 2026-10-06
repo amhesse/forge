@@ -24,3 +24,6 @@ venv/
 .env
 .env.*
 
+
+# forge calibrate's bench (hidden graders): kept private, see README
+bench/

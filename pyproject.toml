@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "An unattended local-model coding loop: worktree-isolated items, TDD mode, concurrent workers, difficulty routing, and a from-scratch editor as an alternative to aider."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 # Stdlib only, deliberately - see README's "What it is not" section. The
 # only non-stdlib things this project ever shells out to (aider, git,
 # ollama) are external programs, not Python dependencies, so a project

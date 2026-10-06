@@ -330,6 +330,16 @@ tier. Results are appended one trial at a time, so an interrupted run can
 be resumed with the same command. `--self-test` confirms each grader
 fails on the untouched fixture and passes on `bench/reference/<id>/`.
 
+The bench itself is **not in this repository**: hidden graders published
+on the internet stop being hidden from models trained on it. Point
+`--bench-dir` at your own (default: `bench/` next to `src/`, which is
+gitignored), laid out as:
+
+    items.toml              [[item]] tables: id, category, text
+    fixture/                the starting project, with its own tests/
+    graders/<id>.py         hidden grader; exit 0 = correct
+    reference/<id>/         overlay of a known-correct solution
+
 ## Writing items
 
 The safety net is only as good as what it can infer from the item text, and

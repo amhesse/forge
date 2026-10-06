@@ -210,9 +210,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--self-test", action="store_true", help="Verify graders against reference solutions")
     args = parser.parse_args(argv)
 
+    out = Path(args.out)
+    if not args.report and not (args.bench_dir / "items.toml").is_file():
+        # The bench is kept out of the public repository: graders a model
+        # could have trained on would stop being hidden.
+        parser.error(f"no calibration bench at {args.bench_dir} (items.toml not found). The "
+                     f"bench is not distributed with forge; pass --bench-dir to your own, laid "
+                     f"out as README's 'Measuring it: forge calibrate' describes.")
     if args.self_test:
         return self_test(args.bench_dir)
-    out = Path(args.out)
     if args.report:
         print(report(load_results(out)))
         return 0
