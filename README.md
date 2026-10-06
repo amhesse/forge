@@ -1,15 +1,78 @@
 # forge
 
-Runs [aider](https://aider.chat) — or a from-scratch alternative editor built
-into this project, see *Editing backend* below — unattended against a
-markdown checklist, with a safety net between each item and the next.
+**Leave a local AI coding model working through a to-do list unattended,
+and come back to work that is either verified or set aside for you: never
+broken work marked "done".**
 
-    pipx install -e .        # or: pip install -e . --break-system-packages
-    forge studio --project-dir ~/projects/thing --port 8888  # Live telemetry & studio UI
-    forge run --project-dir ~/projects/thing --todo-file TODO.md
-    forge draft --project-dir ~/projects/thing --goal "..."
-    forge review --project-dir ~/projects/thing
-    forge eval                                    # forge's own regression suite
+AI coding assistants often say a task is finished when it isn't. The code
+runs and looks plausible, but it's wrong. If you're watching, you catch
+it. If you're not, it ships. forge sits between the model and your code.
+It hands the model one checklist item at a time, checks what comes back,
+and merges only work that passes. Anything it can't confirm is **parked**
+on its own git branch, with a note saying why, for you to review later.
+
+**Who it's for:** developers running local models (through Ollama) who
+want to hand off a batch of small, clearly written coding tasks, such as
+small features, bug fixes, refactors or test-first items, and walk away.
+forge can also drive aider, Claude Code or Gemini as the model doing the
+editing.
+
+**The goal:** no *silent wrongs*, meaning no broken change that looks
+finished. Getting fewer tasks done is acceptable. Getting a wrong change
+merged without anyone noticing is not.
+
+## Results
+
+8 problems from aider's own benchmark
+([Aider-AI/polyglot-benchmark](https://github.com/Aider-AI/polyglot-benchmark),
+Exercism's Python track), all run with the same local model
+(`qwen3.8:27b`, one RTX 3090 Ti) and judged by hidden tests the model never
+sees:
+
+| | Solved and merged | **Wrong, but reported done** | Set aside for a human |
+|---|---:|---:|---:|
+| aider, default settings (120 runs) | 73% | **27%** | 0% |
+| forge, default settings (120 runs) | 20% | **0%** | 80% |
+| forge, tuned (80 runs) | 86% | **0%** | 14% |
+
+- **aider never once gave up.** Across 750 runs (this benchmark plus 14
+  internal tasks on three models), every failure was reported as a
+  success. forge's failures are parked instead.
+- **"Tuned"** means two flags: `--lite-hard-think-off
+  --hard-validation-retries 5`. The tuning was done on forge, while aider
+  ran at its defaults; a like-for-like comparison with aider tuned too is
+  still to be done.
+- Measured with Leash, a separate benchmark harness (write-up to follow).
+
+**What it doesn't do:** forge catches work that fails your tests or breaks
+its structural rules (wrong files touched, content that doesn't match an
+exact spec, and so on). It does not make a model trustworthy, and it won't
+catch a bug your tests don't exercise, including one put there on purpose.
+Read the diffs of anything that matters. See *What it is not* at the end.
+
+## Quick start
+
+Needs Python 3.11+, `git`, and [Ollama](https://ollama.com) with a coding
+model pulled (aider is optional).
+
+    git clone https://github.com/amhesse/forge && cd forge
+    pipx install -e .
+
+In your project (it must be a git repository), write a `TODO.md` with one
+item per line. Name the files and say exactly what you want:
+
+    - [ ] In `app/text.py`, add `slugify(text: str) -> str` that lowercases, replaces runs of non-alphanumerics with "-", and strips leading/trailing "-".
+
+Then run it, and later look at anything it parked:
+
+    forge run --project-dir . --todo-file TODO.md --backend lite --models qwen3-coder:30b
+    forge review --project-dir .      # parked items, in a browser view
+
+Other commands:
+
+    forge draft --project-dir ~/projects/thing --goal "..."   # turn a vague goal into checklist items
+    forge studio --project-dir ~/projects/thing --port 8888   # live telemetry and studio UI
+    forge eval                                                 # forge's own regression suite
 
 Stdlib only — no dependency ever needs installing for the package itself,
 only for the project you point it at. `pipx` is the right tool on a
@@ -17,20 +80,7 @@ system that blocks bare `pip install` (PEP 668, the default on Arch and
 other recent distros): it builds an isolated environment for `forge` and
 still puts a single `forge` command on your PATH.
 
-Was `aider-loop`, when driving aider was the only option; renamed once a
-second editing backend made that name inaccurate. The old name still
-works as a directory symlink and the old script names still exist as
-`forge/aider_loop.py` etc. inside the package, so nothing that referenced
-them elsewhere silently broke. Item branches (`aider-loop/item-N-<date>`)
-and the cache directory (`~/.cache/aider-loop/<project>/`) still use the
-old name too, deliberately - renaming those would orphan every branch
-and run record any project made under the old name, for a purely
-cosmetic gain.
-
-**Naming collision to know about:** `forge` is also the command name for
-Foundry's Ethereum/Solidity toolchain. Nothing on this machine currently
-installs that binary; if it ever does, whichever installs second wins the
-PATH entry, silently. `command -v forge` before relying on either.
+## How it works
 
 The loop itself is simple: take the next unchecked item, hand it to aider,
 check what came back, mark it and move on. The value is in the checking. A
@@ -50,6 +100,23 @@ to stop — the run keeps going, and each parked item's work is left on its
 own branch to read in the morning.
 
     forge run --project-dir ~/projects/thing --todo-file TODO.md
+
+### About the name
+
+Was `aider-loop`, when driving aider was the only option; renamed once a
+second editing backend made that name inaccurate. The old name still
+works as a directory symlink and the old script names still exist as
+`forge/aider_loop.py` etc. inside the package, so nothing that referenced
+them elsewhere silently broke. Item branches (`aider-loop/item-N-<date>`)
+and the cache directory (`~/.cache/aider-loop/<project>/`) still use the
+old name too, deliberately - renaming those would orphan every branch
+and run record any project made under the old name, for a purely
+cosmetic gain.
+
+**Naming collision to know about:** `forge` is also the command name for
+Foundry's Ethereum/Solidity toolchain. Nothing on this machine currently
+installs that binary; if it ever does, whichever installs second wins the
+PATH entry, silently. `command -v forge` before relying on either.
 
 ## What it checks, in order
 
