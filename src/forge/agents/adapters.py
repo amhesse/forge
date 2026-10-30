@@ -10,6 +10,7 @@ from .base import Attempt, Task
 
 
 class LiteAgent:
+    commit_label = "lite_editor"
     name = "lite"
     traits = frozenset({"single_shot", "local"})
 
@@ -45,6 +46,7 @@ class LiteAgent:
 
 
 class AiderAgent:
+    commit_label = "aider"
     name = "aider"
     traits = frozenset({"single_shot", "local"})
 
@@ -56,6 +58,7 @@ class AiderAgent:
 
 
 class ClaudeCodeAgent:
+    commit_label = "claude"
     name = "claude"
     traits = frozenset({"explores", "metered"})
 
@@ -66,6 +69,7 @@ class ClaudeCodeAgent:
 
 
 class AgyAgent:
+    commit_label = "agy"
     name = "agy"
     traits = frozenset({"explores", "metered"})
 

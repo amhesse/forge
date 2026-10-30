@@ -1,6 +1,6 @@
 # Design: pluggable agents behind the gate
 
-Status: proposal, 2026-10-29. Step 1 is built (branch `pluggable-agents`); the rest is not.
+Status: proposal, 2026-10-29. Steps 1 and 1b are built (branch `pluggable-agents`); the rest is not.
 
 ## Why
 
@@ -148,9 +148,13 @@ commands run outside it, under forge, as now.
    become per thread. *Done 2026-10-29:* all 135 existing tests pass, plus
    12 new ones in `tests/test_agents.py`. Still to do: a Leash rerun of a
    small honest subset per backend, which needs the 3090.
-1b. **The supervisor commits.** Adapters stop committing. Kept separate from
-   step 1 because it changes what lands in git history (commit messages), so
-   step 1 could stay a pure refactor.
+1b. **The supervisor commits.** Adapters stop committing; forge stages and
+   commits after every attempt (`agents/commit.py`), keeping each agent's old
+   message prefix. It never stages the untracked config and links
+   `materialize()` copied in; claude and agy used to `git add -A` those. "Made
+   no changes" is decided once, for every agent. aider still auto-commits, so
+   there is usually nothing left for forge to commit. *Done 2026-10-29:* 154
+   tests pass, including the end-to-end `forge run` hook tests.
 2. **The Reviewer protocol.** Replace `run_review_gate`'s chain and the copied
    verdict parsing, and default to diff only.
 3. **Scope policy** for the scoped and unscoped items above.

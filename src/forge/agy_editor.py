@@ -116,16 +116,8 @@ def run_agy_on_item(worktree: Path, item_text: str, log, files: list[str] | None
     ok, text = _run(worktree, prompt, model, timeout, log)
     if not ok:
         return False, text
-    # Same as claude_editor: the loop judges `git diff base HEAD`, so the
-    # work has to be committed; out-of-scope files are put back afterwards
+    # Same as claude_editor: forge commits the work (agents/commit.py) and
+    # decides "made no changes"; out-of-scope files are put back afterwards
     # by restore_unnamed_files.
-    git = lambda *a: subprocess.run(["git", *a], cwd=str(worktree), capture_output=True, text=True)
-    git("add", "-A")
-    if not git("status", "--porcelain").stdout.strip():
-        log("[agy] finished but changed nothing")
-        return False, "agy made no changes"
-    commit = git("commit", "-q", "-m", f"agy: {item_text.splitlines()[0][:72]}")
-    if commit.returncode != 0:
-        return False, f"git commit failed: {commit.stderr}"
-    log(f"[agy] committed: {text.strip()[-300:]}")
+    log(f"[agy] finished: {text.strip()[-300:]}")
     return True, text

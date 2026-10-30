@@ -382,8 +382,23 @@ def _dispatch_editor(project_dir: Path, item_text: str, log_path: Path,
         hard_item = estimate_difficulty(item_text) == DIFFICULTY_HARD
     task = agents.Task(text=item_text, worktree=project_dir, log_path=log_path, files=files,
                        model=model, hard=hard_item, think_off=force_think_off)
-    result = agents.get_agent(backend).attempt(task, lambda m: log(m, log_path))
-    return result.ok, result.output, result.usage
+    agent = agents.get_agent(backend)
+    head_before = git_head(project_dir)
+    result = agent.attempt(task, lambda m: log(m, log_path))
+    if not result.ok:
+        return False, result.output, result.usage
+    # The supervisor commits, the same way for every agent (design step 1b):
+    # the gate judges `git diff base HEAD`. aider has usually committed its
+    # own work already, which leaves nothing here to commit.
+    committed, error = agents.commit_attempt(
+        project_dir, f"{agent.commit_label}: {item_text.splitlines()[0][:72]}")
+    if error:
+        log(f"[{agent.name}] {error}", log_path)
+        return False, error, result.usage
+    if not committed and git_head(project_dir) == head_before:
+        log(f"[{agent.name}] finished but changed nothing", log_path)
+        return False, f"{agent.name} made no changes", result.usage
+    return True, result.output, result.usage
 
 
 def _accumulate_usage(record: dict, usage: dict, model: str | None = None) -> None:

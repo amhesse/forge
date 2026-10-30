@@ -556,9 +556,7 @@ def run_lite_on_item(project_dir: Path, item_text: str, log_path: Path,
     if not status.stdout.strip():
         _log(f"[lite_editor] wrote {written} but git reports no change - nothing to commit", log_path)
         return False, "model's output was identical to the current content; nothing changed"
-    commit_result = _git(["commit", "-q", "-m", f"lite_editor: {item_text.splitlines()[0][:72]}"], project_dir)
-    if commit_result.returncode != 0:
-        return False, f"git commit failed: {commit_result.stderr}"
-
-    _log(f"[lite_editor] wrote and committed {written}", log_path)
+    # Staged, not committed: forge commits every agent's work the same way
+    # (agents/commit.py), right after this returns.
+    _log(f"[lite_editor] wrote {written}", log_path)
     return True, raw

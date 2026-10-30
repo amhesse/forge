@@ -1,6 +1,7 @@
 """Agents forge can hand an item to. See docs/design-pluggable-agents.md."""
 from .adapters import AgyAgent, AiderAgent, ClaudeCodeAgent, LiteAgent
 from .base import Agent, Attempt, Task
+from .commit import commit_attempt
 
 REGISTRY: dict[str, Agent] = {a.name: a for a in (LiteAgent(), AiderAgent(), ClaudeCodeAgent(), AgyAgent())}
 DEFAULT = "aider"
@@ -13,4 +14,4 @@ def get_agent(name: str | None) -> Agent:
     return REGISTRY.get(name or DEFAULT, REGISTRY[DEFAULT])
 
 
-__all__ = ["Agent", "Attempt", "Task", "REGISTRY", "DEFAULT", "get_agent"]
+__all__ = ["Agent", "Attempt", "Task", "REGISTRY", "DEFAULT", "get_agent", "commit_attempt"]

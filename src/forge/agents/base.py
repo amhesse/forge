@@ -30,5 +30,6 @@ class Attempt:
 class Agent(Protocol):
     name: str
     traits: frozenset[str]          # "single_shot", "explores", "runs_shell", "local", "metered"
+    commit_label: str               # prefix of the commit forge makes for its work
 
     def attempt(self, task: Task, log: Callable[[str], None]) -> Attempt: ...

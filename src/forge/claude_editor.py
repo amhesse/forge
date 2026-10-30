@@ -138,18 +138,9 @@ def run_claude_on_item(worktree: Path, item_text: str, log, files: list[str] | N
     ok, text = _run(worktree, prompt, EDIT_TOOLS, model, timeout, log)
     if not ok:
         return False, text
-    # The loop judges `git diff base HEAD`, so like the other backends this
-    # one has to leave its work committed. Everything is staged: files
-    # outside the item's scope are put back by restore_unnamed_files after.
-    git = lambda *a: subprocess.run(["git", *a], cwd=str(worktree), capture_output=True, text=True)
-    git("add", "-A")
-    if not git("status", "--porcelain").stdout.strip():
-        log("[claude] finished but changed nothing")
-        return False, "claude made no changes"
-    commit = git("commit", "-q", "-m", f"claude: {item_text.splitlines()[0][:72]}")
-    if commit.returncode != 0:
-        return False, f"git commit failed: {commit.stderr}"
-    log(f"[claude] committed: {text.strip()[-300:]}")
+    # forge commits the work (agents/commit.py) and decides "made no changes";
+    # files outside the item's scope are put back by restore_unnamed_files.
+    log(f"[claude] finished: {text.strip()[-300:]}")
     return True, text
 
 

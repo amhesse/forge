@@ -3,8 +3,12 @@
 Step 1 of docs/design-pluggable-agents.md is a pure refactor, so these check
 that each agent does exactly what its old branch did, and that usage is per
 thread for every editor (claude and agy used module globals before, which
-parallel workers could read across items).
+parallel workers could read across items). Step 1b moved committing out of
+the agents and into the supervisor: TestCommitAttempt and TestDispatch run
+against a real throwaway repository.
 """
+import subprocess
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -96,24 +100,100 @@ class TestOtherAgents(unittest.TestCase):
         self.assertEqual(result.usage, {"prompt_tokens": 1000})
 
 
-class TestDispatch(unittest.TestCase):
-    def test_backend_override_wins_and_difficulty_is_estimated_when_not_given(self):
-        seen = {}
+def git(cwd, *args):
+    return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd,
+                          check=True, capture_output=True, text=True).stdout.strip()
 
-        class Spy:
-            name, traits = "spy", frozenset()
 
-            def attempt(self, task, log):
-                seen["task"] = task
-                return agents.Attempt(True, "o", {"seconds": 1.0})
+class RepoTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name)
+        git(self.repo, "init", "-q", "-b", "master")
+        git(self.repo, "config", "user.email", "t@t")
+        git(self.repo, "config", "user.name", "t")
+        (self.repo / "mod.py").write_text("value = 0\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "base")
+        self.base = git(self.repo, "rev-parse", "HEAD")
 
-        with mock.patch.dict(agents.REGISTRY, {"spy": Spy()}), \
-             mock.patch.object(runner, "estimate_difficulty", return_value=runner.DIFFICULTY_HARD):
-            out = runner._dispatch_editor(WT, "item", LOG, files=None, model="m", backend_override="spy",
-                                          force_think_off=True)
+    def files_in_head(self):
+        return set(git(self.repo, "diff", "--name-only", self.base, "HEAD").split())
+
+
+class TestCommitAttempt(RepoTest):
+    def test_commits_the_work_but_never_what_materialize_put_there(self):
+        (self.repo / "mod.py").write_text("value = 1\n")
+        (self.repo / "new.py").write_text("x = 1\n")
+        (self.repo / ".aiderloop.toml").write_text("[validate]\n")   # copied in, untracked
+        (self.repo / "venv").symlink_to(self.repo, target_is_directory=True)
+        self.assertEqual(agents.commit_attempt(self.repo, "lite_editor: item"), (True, ""))
+        self.assertEqual(self.files_in_head(), {"mod.py", "new.py"})
+        self.assertEqual(git(self.repo, "log", "-1", "--format=%s"), "lite_editor: item")
+
+    def test_a_tracked_config_file_the_item_edits_is_still_committed(self):
+        (self.repo / ".aiderloop.toml").write_text("[validate]\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "track config")
+        self.base = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / ".aiderloop.toml").write_text("[validate]\ncommands = []\n")
+        self.assertEqual(agents.commit_attempt(self.repo, "m"), (True, ""))
+        self.assertEqual(self.files_in_head(), {".aiderloop.toml"})
+
+    def test_nothing_to_commit_is_not_an_error(self):
+        (self.repo / ".forge.toml").write_text("x = 1\n")   # only a materialized file
+        self.assertEqual(agents.commit_attempt(self.repo, "m"), (False, ""))
+
+
+class Spy:
+    name, traits, commit_label = "spy", frozenset(), "spy"
+
+    def __init__(self, ok=True, edit=None, self_commit=False):
+        self.ok, self.edit, self.self_commit, self.task = ok, edit, self_commit, None
+
+    def attempt(self, task, log):
+        self.task = task
+        if self.edit:
+            (task.worktree / "mod.py").write_text(self.edit)
+            if self.self_commit:
+                git(task.worktree, "commit", "-qam", "agent's own commit")
+        return agents.Attempt(self.ok, "o", {"seconds": 1.0})
+
+
+class TestDispatch(RepoTest):
+    def dispatch(self, spy, **kw):
+        with mock.patch.dict(agents.REGISTRY, {"spy": spy}):
+            return runner._dispatch_editor(self.repo, "set value\nmore", LOG, files=["mod.py"], model="m",
+                                           backend_override="spy", **kw)
+
+    def test_supervisor_commits_with_the_agents_label(self):
+        out = self.dispatch(Spy(edit="value = 1\n"))
         self.assertEqual(out, (True, "o", {"seconds": 1.0}))
-        self.assertTrue(seen["task"].hard)
-        self.assertTrue(seen["task"].think_off)
+        self.assertEqual(git(self.repo, "log", "-1", "--format=%s"), "spy: set value")
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+
+    def test_ok_but_no_change_is_a_failure(self):
+        out = self.dispatch(Spy(edit=None))
+        self.assertEqual(out[:2], (False, "spy made no changes"))
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.base)
+
+    def test_an_agent_that_committed_itself_needs_nothing_more(self):
+        out = self.dispatch(Spy(edit="value = 2\n", self_commit=True))
+        self.assertTrue(out[0])
+        self.assertEqual(git(self.repo, "log", "-1", "--format=%s"), "agent's own commit")
+
+    def test_a_failed_attempt_is_not_committed(self):
+        out = self.dispatch(Spy(ok=False, edit="value = 3\n"))
+        self.assertFalse(out[0])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.base)
+
+    def test_difficulty_is_estimated_when_not_given(self):
+        spy = Spy(edit="value = 1\n")
+        with mock.patch.object(runner, "estimate_difficulty", return_value=runner.DIFFICULTY_HARD):
+            self.dispatch(spy, force_think_off=True)
+        self.assertTrue(spy.task.hard)
+        self.assertTrue(spy.task.think_off)
 
 
 class TestUsageIsPerThread(unittest.TestCase):
