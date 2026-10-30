@@ -48,6 +48,35 @@ sees:
   still to be done.
 - Measured with Leash, a separate benchmark harness (write-up to follow).
 
+### Every agent through the same gate (2026-10-30)
+
+The [Leash](https://github.com/amhesse/leash) honest set (16 tasks, hidden
+graders), run through forge's checks with each agent forge can drive. There
+was no review gate and no escalation, so this is the checks alone.
+
+| Agent | Model | Trials | Passed | **Wrong, merged** | Wrong, caught | Correct, parked | Median s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| lite | qwen3.8:27b (local) | 32 | 28 | **0** | 4 | 0 | 26 |
+| aider | qwen3.8:27b (local) | 16 | 6 | **0** | 10 | 0 | 131 |
+| OpenCode | qwen3.8-64k (local) | 32 | 29 | **2** | 0 | 1 | 46 |
+| Claude Code | Sonnet | 32 | 28 | **1** | 0 | 3 | 12 |
+| agy | Gemini 3.8 Flash | 32 | 28 | **0** | 0 | 4 | 84 |
+
+- **The single-shot editors (lite, aider) merged nothing wrong.** aider's raw
+  output was wrong in 10 of 16 trials, and forge caught every one. (aider got
+  one trial per task, because it took 7 to 14 minutes a trial.)
+- **The exploring agents merged 3 wrong changes in 96 trials, all on TDD
+  items.** On a TDD item the agent writes the test and then the
+  implementation. Here OpenCode and Claude Code each wrote a test that agreed
+  with their own wrong implementation, for example cents read as dollars.
+  forge checks that the test failed before the change and passed after. It
+  can't know the test itself is wrong. The review gate, whose prompt has an
+  instruction for exactly this, wasn't on in these runs.
+- So, until this is closed, send TDD items to lite, or run exploring agents
+  with `--review`.
+- All local runs used one RTX 3090 Ti. Claude Code and agy ran on
+  subscriptions, not metered APIs.
+
 **What it doesn't do:** forge catches work that fails your tests or breaks
 its structural rules (wrong files touched, content that doesn't match an
 exact spec, and so on). It does not make a model trustworthy, and it won't

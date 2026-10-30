@@ -1,6 +1,6 @@
 # Design: pluggable agents behind the gate
 
-Status: proposal, 2026-10-29. Steps 1 to 5 are built (branch `pluggable-agents`); 6 is not.
+Status: proposal, 2026-10-29. Steps 1 to 6 are built (branch `pluggable-agents`). Step 6 found an open hole: exploring agents on TDD items.
 
 ## Why
 
@@ -222,9 +222,19 @@ commands run outside it, under forge, as now.
      it isn't a terminal, and the sandbox passed forge's stdin through. The
      sandbox now gives the agent an empty stdin. It also stops a sandbox
      that's still running 10 s after the agent's final answer.
-6. **Leash: every agent through the same gate.** Report solved, wrong merged
-   and parked per agent, on the honest set and on a SWE-bench Verified subset.
-   That table is the public claim.
+6. **Leash: every agent through the same gate.** *Done 2026-10-30, on the
+   Leash honest set.* The table is in the README, under Results. The raw
+   results are in leash/results/forge-agents-2026-10-30/.
+   - lite and aider merged nothing wrong.
+   - The exploring agents merged 3 wrong changes in 96 trials (OpenCode 2,
+     Claude Code 1), all TDD items whose self-written test agreed with a
+     wrong implementation.
+   - Next: close that hole. Options:
+     - make `--review` mandatory for TDD items an exploring agent takes,
+       the same rule as "guarded" unscoped items;
+     - keep exploring agents out of the red phase.
+   - The SWE-bench Verified subset is still to do. It needs per-repo Docker
+     images and its own harness work.
 
 ## Not changing
 
