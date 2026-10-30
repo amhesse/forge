@@ -18,6 +18,7 @@ class Task:
     model: str | None = None
     hard: bool = False              # estimate_difficulty() == HARD
     think_off: bool = False         # set by the retry loop after a truncated attempt
+    scope: list[str] = field(default_factory=list)  # the item's `scope:` globs, if any
 
 
 @dataclass

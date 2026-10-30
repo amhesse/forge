@@ -64,7 +64,8 @@ class ClaudeCodeAgent:
 
     def attempt(self, task: Task, log) -> Attempt:
         ok, output = claude_editor.run_claude_on_item(task.worktree, task.text, log,
-                                                      files=task.files, model=task.model)
+                                                      files=task.files, model=task.model,
+                                                      scope=task.scope)
         return Attempt(ok, output, claude_editor.last_usage())
 
 
@@ -75,5 +76,6 @@ class AgyAgent:
 
     def attempt(self, task: Task, log) -> Attempt:
         ok, output = agy_editor.run_agy_on_item(task.worktree, task.text, log,
-                                                files=task.files, model=task.model)
+                                                files=task.files, model=task.model,
+                                                scope=task.scope)
         return Attempt(ok, output, agy_editor.last_usage())

@@ -82,14 +82,14 @@ class TestOtherAgents(unittest.TestCase):
              mock.patch.object(claude_editor, "last_usage", return_value={"seconds": 3.0}):
             result = agents.get_agent("claude").attempt(self.task(), print)
         self.assertEqual(run.call_args.args[:2], (WT, "item"))
-        self.assertEqual(run.call_args.kwargs, {"files": ["a.py"], "model": "m"})
+        self.assertEqual(run.call_args.kwargs, {"files": ["a.py"], "model": "m", "scope": []})
         self.assertEqual(result.usage, {"seconds": 3.0})
 
     def test_agy_passes_through(self):
         with mock.patch.object(agy_editor, "run_agy_on_item", return_value=(False, "no")) as run, \
              mock.patch.object(agy_editor, "last_usage", return_value={}):
             result = agents.get_agent("agy").attempt(self.task(), print)
-        self.assertEqual(run.call_args.kwargs, {"files": ["a.py"], "model": "m"})
+        self.assertEqual(run.call_args.kwargs, {"files": ["a.py"], "model": "m", "scope": []})
         self.assertFalse(result.ok)
 
     def test_aider_uses_runner_functions_and_parses_tokens(self):

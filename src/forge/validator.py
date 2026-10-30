@@ -482,6 +482,50 @@ def _negates(path: str, after: str) -> bool:
     return True
 
 
+# An item can declare the paths it may change instead of (or as well as)
+# naming files: a line "scope: src/game/**, assets/*.json" (outside any fenced
+# block; backticks around a pattern are fine). Exploring agents legitimately
+# touch files nobody named, and this is how such an item stays scoped: every
+# change outside it is put back, exactly like a file a named-file item didn't
+# name. `**` matches across directories, `*` and `?` within one.
+SCOPE_RE = re.compile(r"^\s*(?:[-*]\s+)?scope:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def item_scope(item_text: str) -> list[str]:
+    """The glob patterns of the item's `scope:` line(s), or [] if it has none."""
+    prose_only = _FENCE_RE.sub("", item_text)
+    globs = []
+    for m in SCOPE_RE.finditer(prose_only):
+        for part in re.split(r"[,\s]+", m.group(1)):
+            part = part.strip().strip("`").lstrip("./")
+            if part:
+                globs.append(part)
+    return sorted(set(globs))
+
+
+def _glob_regex(glob: str) -> re.Pattern:
+    out, i = "", 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif glob.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif glob[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif glob[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(glob[i]), i + 1
+    if glob.endswith("/"):           # "src/game/" means everything under it
+        out += ".*"
+    return re.compile(out + r"\Z")
+
+
+def in_scope(path: str, globs: list[str]) -> bool:
+    """True if repo-relative `path` matches any of the item's scope globs."""
+    return any(_glob_regex(g).match(path) for g in globs)
+
+
 def expected_files(item_text: str) -> list[str]:
     """Backtick-quoted file paths mentioned in the task text (outside any
     fenced code block) - the files we expect this item's commit to actually
@@ -500,7 +544,7 @@ def expected_files(item_text: str) -> list[str]:
     prose outside any fence names a real one ("In `results.html`, add...").
     extract_exact_content_specs() is what actually verifies fenced content,
     separately and more precisely than this function ever could."""
-    prose_only = _FENCE_RE.sub("", item_text)
+    prose_only = SCOPE_RE.sub("", _FENCE_RE.sub("", item_text))  # a scope line names no file
     expected = []
     for m in FILE_PATH_RE.finditer(prose_only):
         after = prose_only[m.end():m.end() + 120]
@@ -620,15 +664,17 @@ def changed_files(project_dir: Path, pre_hash: str) -> list[str]:
 
 
 def restore_unnamed_files(project_dir: Path, pre_hash: str, expected: list[str],
-                          log_path: Path) -> list[str]:
-    """Reverts every file changed since pre_hash that the task didn't name,
-    commits the restoration, and returns the paths restored. Does nothing
-    when the task named no files (there's no scope to enforce) or when the
-    project sets [scope] restore_unnamed = false."""
-    if not expected or not cfg("scope", "restore_unnamed", default=True):
+                          log_path: Path, scope: list[str] | None = None) -> list[str]:
+    """Reverts every file changed since pre_hash that the task didn't name
+    and that isn't inside its `scope:` globs, commits the restoration, and
+    returns the paths restored. Does nothing when the task named no files and
+    declared no scope (there's nothing to enforce) or when the project sets
+    [scope] restore_unnamed = false."""
+    scope = scope or []
+    if not (expected or scope) or not cfg("scope", "restore_unnamed", default=True):
         return []
     extra = [f for f in changed_files(project_dir, pre_hash)
-             if not any(path_matches_any(e, [f]) for e in expected)]
+             if not any(path_matches_any(e, [f]) for e in expected) and not in_scope(f, scope)]
     if not extra:
         return []
     for rel in extra:
@@ -644,5 +690,6 @@ def restore_unnamed_files(project_dir: Path, pre_hash: str, expected: list[str],
     subprocess.run(["git", "commit", "-q", "-m",
                     f"aider-loop: restore files the task didn't name: {', '.join(extra)}"],
                    cwd=str(project_dir), capture_output=True)
-    log(f"Restored file(s) the task didn't name: {extra} (task named: {expected})", log_path)
+    log(f"Restored file(s) the task didn't name: {extra} (task named: {expected}"
+        + (f", scope: {scope}" if scope else "") + ")", log_path)
     return extra

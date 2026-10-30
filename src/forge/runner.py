@@ -51,6 +51,7 @@ from .validator import (
     detect_prompt_leakage,
     expected_files,
     extract_exact_content_specs,
+    item_scope,
     path_matches_any,
     preflight_repo_size,
     restore_unnamed_files,
@@ -325,7 +326,8 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
                        files: list[str] | None = None, model: str | None = None,
                        backend_override: str | None = None,
                        hard_item: bool | None = None,
-                       force_think_off: bool = False) -> tuple[bool, str, dict]:
+                       force_think_off: bool = False,
+                       scope: list[str] | None = None) -> tuple[bool, str, dict]:
     """Every editor call goes through here, so this is the one place
     --doer-preamble is applied: prepended to the prompt text the editor
     model receives, and nothing else. Every check (expected files, exact
@@ -339,7 +341,8 @@ def run_editor_on_item(project_dir: Path, item_text: str, log_path: Path,
     editor_text = f"{DOER_PREAMBLE}\n\n{item_text}" if DOER_PREAMBLE else item_text
     success, output, usage = _dispatch_editor(project_dir, editor_text, log_path, files=files,
                                               model=model, backend_override=backend_override,
-                                              hard_item=hard_item, force_think_off=force_think_off)
+                                              hard_item=hard_item, force_think_off=force_think_off,
+                                              scope=scope)
     if EDITOR_OUTPUT_DIR is not None:
         _save_editor_output(success, output, usage, model, backend_override)
     return success, output, usage
@@ -366,7 +369,8 @@ def _dispatch_editor(project_dir: Path, item_text: str, log_path: Path,
                      files: list[str] | None = None, model: str | None = None,
                      backend_override: str | None = None,
                      hard_item: bool | None = None,
-                     force_think_off: bool = False) -> tuple[bool, str, dict]:
+                     force_think_off: bool = False,
+                     scope: list[str] | None = None) -> tuple[bool, str, dict]:
     """Hands the item to whichever agent the project asked for:
     --backend / `[model] backend` in .aiderloop.toml, default aider (see
     forge.agents.get_agent). Each agent is a thin adapter over the editor
@@ -381,7 +385,7 @@ def _dispatch_editor(project_dir: Path, item_text: str, log_path: Path,
     if hard_item is None:
         hard_item = estimate_difficulty(item_text) == DIFFICULTY_HARD
     task = agents.Task(text=item_text, worktree=project_dir, log_path=log_path, files=files,
-                       model=model, hard=hard_item, think_off=force_think_off)
+                       model=model, hard=hard_item, think_off=force_think_off, scope=scope or [])
     agent = agents.get_agent(backend)
     head_before = git_head(project_dir)
     result = agent.attempt(task, lambda m: log(m, log_path))
@@ -540,11 +544,12 @@ def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: li
             f"Original task:\n{item_text}\n\n"
             f"Reviewer feedback:\n{feedback}\n\n"
             f"Fix the problems the reviewer lists while still completing the original task."
-        ), log_path, files=expected, model=model, backend_override=backend_override)
+        ), log_path, files=expected, model=model, backend_override=backend_override,
+            scope=item_scope(item_text))
         _accumulate_usage(record, fix_usage, model=model)
         if not fix_success:
             continue
-        restore_unnamed_files(worktree_path, restore_base, expected, log_path)
+        restore_unnamed_files(worktree_path, restore_base, expected, log_path, scope=item_scope(item_text))
         wt.restore_todo(worktree_path, base, args.todo_file)
         touched = changed_files(worktree_path, base)
         record["touched_files"] = touched
@@ -554,6 +559,30 @@ def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: li
             record["validation_output"] = validation_msg[-4000:]
             log(f"Review fix broke validation, parking blocked: {item_text}", log_path)
             return finish(STATUS_BLOCKED, "validation failed after review fix")
+
+
+UNSCOPED_POLICIES = ("refuse", "guarded", "allow")
+
+
+def unscoped_item_problem(args) -> str | None:
+    """Why an item that names no file and declares no `scope:` may not run,
+    or None if it may. Nothing would hold such an item to anything, so by
+    default ([scope] unscoped = "refuse") it doesn't run; preflight already
+    stops the whole run over one. "guarded" lets it run only with the two
+    checks that don't depend on scope, real validate commands and a review,
+    so a looser scope always buys a stronger check. "allow" is the old, open
+    behaviour, for a project that wants it."""
+    policy = cfg("scope", "unscoped", default="refuse")
+    if policy == "allow":
+        return None
+    if policy == "guarded":
+        missing = [what for what, have in (
+            ("[validate] commands", bool(cfg("validate", "commands", default=[]))),
+            ("--review", bool(getattr(args, "review", None)))) if not have]
+        if not missing:
+            return None
+        return f"names no file and declares no scope, and [scope] unscoped = \"guarded\" needs {' and '.join(missing)}"
+    return "names no file and declares no scope ([scope] unscoped = \"refuse\")"
 
 
 def process_item(project_dir: Path, item: TodoItem, index: int,
@@ -608,9 +637,18 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
     # Parsed before the run, not after: these are both what aider is handed
     # as editable and what the touched-files check later holds it to.
     expected = expected_files(item.text)
+    item_globs = item_scope(item.text)
     config.emit_stage(index, item.text, "worktree", expected)
     if expected:
         log(f"Handing aider the file(s) the item named: {expected}", log_path)
+    if item_globs:
+        record["scope"] = item_globs
+        log(f"Item scope: {item_globs} (changes outside it are put back)", log_path)
+    if not expected and not item_globs:
+        blocked = unscoped_item_problem(args)
+        if blocked:
+            log(f"{blocked}. Parking: {item.text}", log_path)
+            return finish(STATUS_NEEDS_REVIEW, blocked)
 
     # Repair mode (--repair-from): start from an earlier, parked attempt and
     # ask the editor to fix it. `base` deliberately stays the original base,
@@ -674,7 +712,7 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
             record["adaptive_think_off_retries"] = \
                 record.get("adaptive_think_off_retries", 0) + 1
         success, last_output, usage = run_editor_on_item(
-            worktree_path, editor_task, log_path, files=expected, model=model,
+            worktree_path, editor_task, log_path, files=expected, model=model, scope=item_globs,
             backend_override=backend_override, force_think_off=think_off_next)
         _accumulate_usage(record, usage, model=model)
         if not success and _truncated_without_output(last_output, usage):
@@ -725,7 +763,7 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
         record["touched_files"] = suspicious
         return finish(STATUS_BLOCKED, f"garbage filename(s) created: {suspicious}")
 
-    restore_unnamed_files(worktree_path, base, expected, log_path)
+    restore_unnamed_files(worktree_path, base, expected, log_path, scope=item_globs)
     if wt.restore_todo(worktree_path, base, args.todo_file):
         log(f"Item edited {args.todo_file}; restored it (the checklist is the "
             f"loop's bookkeeping, not the item's work).", log_path)
@@ -765,7 +803,8 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
             f"Validation failure output:\n{validation_msg}\n\n"
             f"Fix the failure above while still completing the original task. "
             f"Do not revert or abandon the original change; correct it."
-        ), log_path, files=expected, model=model, backend_override=backend_override)
+        ), log_path, files=expected, model=model, backend_override=backend_override,
+            scope=item_globs)
         _accumulate_usage(record, fix_usage, model=model)
         if not fix_success:
             # See the same spot in run_tdd_phases for why this continues
@@ -784,7 +823,7 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
             record["touched_files"] = suspicious
             record["validation_retries"] = validation_attempt
             return finish(STATUS_BLOCKED, f"garbage filename(s) created on retry: {suspicious}")
-        restore_unnamed_files(worktree_path, base, expected, log_path)
+        restore_unnamed_files(worktree_path, base, expected, log_path, scope=item_globs)
         wt.restore_todo(worktree_path, base, args.todo_file)
         touched = changed_files(worktree_path, base)
         record["touched_files"] = touched

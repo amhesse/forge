@@ -103,12 +103,18 @@ def _run(cwd: Path, prompt: str, model: str | None, timeout: int, log) -> tuple[
 
 
 def run_agy_on_item(worktree: Path, item_text: str, log, files: list[str] | None = None,
-                    model: str | None = None, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
-    scope = ""
+                    model: str | None = None, timeout: int = DEFAULT_TIMEOUT,
+                    scope: list[str] | None = None) -> tuple[bool, str]:
+    # Named files and a `scope:` say the same thing to the agent that the
+    # gate enforces afterwards: what it may change.
+    allowed = []
     if files:
-        scope = ("\n\nOnly modify these file(s): " + ", ".join(files)
-                 + ". Read any other file you need for context, but do not change it.")
-    prompt = (f"Implement this task in the current repository.{scope}\n\n"
+        allowed.append("these file(s): " + ", ".join(files))
+    if scope:
+        allowed.append("files matching: " + ", ".join(scope))
+    limit = ("\n\nOnly modify " + "; and ".join(allowed)
+             + ". Read any other file you need for context, but do not change it.") if allowed else ""
+    prompt = (f"Implement this task in the current repository.{limit}\n\n"
               f"Task:\n{item_text}\n\n"
               "Make the edits directly. Do not run shell commands, do not commit, and do not "
               "create files the task doesn't call for. When done, reply with one line "

@@ -1,6 +1,6 @@
 # Design: pluggable agents behind the gate
 
-Status: proposal, 2026-10-29. Steps 1, 1b and 2 are built (branch `pluggable-agents`); the rest is not.
+Status: proposal, 2026-10-29. Steps 1, 1b, 2 and 3 are built (branch `pluggable-agents`); the rest is not.
 
 ## Why
 
@@ -110,9 +110,10 @@ Exploring agents legitimately touch files nobody named. The rule:
 - **Named files** (the current behaviour): strict, unchanged.
 - **Declared scope** (new item syntax, e.g. `scope: src/game/**`): changes are
   allowed inside the scope and restored outside it.
-- **Unscoped**: allowed only when the project has real validate commands, and
-  the review gate becomes mandatory for that item. "No silent wrongs" holds
-  because a looser scope always buys a stronger check, never a weaker one.
+- **Unscoped**: refused by default, as before. With `[scope] unscoped =
+  "guarded"` it runs only when the project has real validate commands and
+  the run has `--review`. "No silent wrongs" holds because a looser scope
+  always buys a stronger check, never a weaker one.
 
 ## Routing
 
@@ -169,7 +170,17 @@ commands run outside it, under forge, as now.
      (Ollama cuts it silently), and `[review] ollama_num_ctx` raises it.
    172 tests pass, 18 of them new in `tests/test_review.py`, including the
    gate's approve, reject and couldn't-run paths.
-3. **Scope policy** for the scoped and unscoped items above.
+3. **Scope policy** for the scoped and unscoped items above. *Done
+   2026-10-29.* One correction to the plan: an unscoped item never actually
+   ran open before, because preflight aborted the whole run over it. So the
+   default stays "refuse", `"guarded"` is opt-in, and `"allow"` is the
+   escape hatch.
+   - `scope:` lines are parsed in `validator.item_scope`, and
+     `restore_unnamed_files` honours them.
+   - Claude and agy are told the scope in their prompt.
+   - Preflight accepts a scoped item.
+   - 187 tests pass, 15 of them new in `tests/test_scope.py`, including two
+     real `forge run`s.
 4. **`OpenCodeAgent` and the sandbox wrapper.**
 5. **The routing and escalation config.**
 6. **Leash: every agent through the same gate.** Report solved, wrong merged

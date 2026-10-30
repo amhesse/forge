@@ -436,6 +436,22 @@ Only backtick paths the item should *edit*. A path mentioned as a reference
 the item will be marked needs-review for not touching it. Write reference
 paths without backticks.
 
+**Or declare a scope** when the item needs an agent that explores, and you
+can't name every file it will touch:
+
+```markdown
+- [ ] Add a second enemy type that patrols between two points.
+  scope: src/game/**, assets/enemies/*.json
+```
+
+Changes inside the scope are kept, and anything changed outside it is put
+back, exactly as for a file a named-file item didn't name. `**` crosses
+directories, while `*` and `?` stay within one. Named files and a scope
+combine. An item with neither is refused by default, and preflight stops
+the run. `[scope] unscoped = "guarded"` lets such an item run only when the
+project has `[validate] commands` and the run has `--review` (otherwise it
+is parked). `"allow"` is the old, open behaviour.
+
 **Say "exactly:" before a fenced block** to enable byte-exact checking:
 
 ```markdown

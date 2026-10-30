@@ -57,6 +57,8 @@ import urllib.request
 from pathlib import Path
 
 from . import aider_loop as al
+from .config import cfg
+from .validator import item_scope
 
 # qwen3.8-aider (27B) was the obvious first choice for a planning role -
 # it's the model this project has that's meant to reason, not just write
@@ -377,9 +379,13 @@ def fatal_problems(item: al.TodoItem, project_dir: Path) -> list[str]:
 def _validate_item_typed(item: al.TodoItem, project_dir: Path) -> list[tuple[str, bool]]:
     problems: list[tuple[str, bool]] = []
     files = al.expected_files(item.text)
-    if not files:
-        problems.append(("names no file in backticks - the touched-files check "
-                         "will have nothing to verify", True))
+    if not files and not item_scope(item.text):
+        # Fatal unless the project chose otherwise: with no file and no
+        # `scope:` line, nothing holds the item to anything ([scope] unscoped,
+        # see runner.unscoped_item_problem for what "guarded" still requires).
+        policy = cfg("scope", "unscoped", default="refuse")
+        problems.append(("names no file in backticks and has no `scope:` line - the "
+                         "touched-files check will have nothing to verify", policy == "refuse"))
     specs = al.extract_exact_content_specs(item.text)
     has_fence = "```" in item.text
     if has_fence and not specs and "exactly" not in item.text.lower():
