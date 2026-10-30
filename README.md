@@ -603,6 +603,36 @@ costs context twice, once read and once rewritten. Keep items to one
 file, and prefer `lite` on projects whose files are small enough to
 rewrite comfortably.
 
+## Exploring agent: `--backend opencode`
+
+`lite` and `aider` edit the files an item names, and nothing else. For items
+that need an agent to look around the repository and run things (a `scope:`
+item, say), `--backend opencode` hands the item to
+[OpenCode](https://opencode.ai) running a local model:
+
+    forge run --project-dir ~/projects/game --backend opencode --models qwen3.8-64k
+
+- **It only runs inside a bubblewrap sandbox** (`bwrap`). Without it, forge
+  refuses to run it at all. Inside, it sees the item's worktree read-write,
+  plus `/usr` and `/etc` read-only, and nothing else of your home directory:
+  no keys, no other projects, not the project's own `.git`. It gets a
+  throwaway home directory, deleted afterwards. The network is shared,
+  because the model server is on localhost, and bubblewrap can't allow one
+  address and block the rest. Treat that as a known gap.
+- **Its config is forge's, not yours.** forge passes OpenCode a complete
+  config for each item, so `~/.config/opencode/opencode.json` is never read
+  or changed. The model server defaults to Ollama's OpenAI-compatible
+  endpoint, `http://localhost:11434/v1`. Point it at llama-server or another
+  server with `[opencode] base_url`, and set the model there with
+  `[opencode] model` (otherwise `--models` or `[model] author` is used).
+  Ollama's `/v1` has broken tool calls silently in agent frameworks before. A
+  model whose tool calls never arrive changes nothing, and forge parks the
+  item for that rather than counting it as done.
+- **forge still decides.** OpenCode doesn't commit (it can't reach the
+  repository's `.git` from the sandbox anyway). forge commits its work, and
+  every check (scope, named files, validate, review) runs exactly as for any
+  other backend.
+
 ## Escalating to Claude: `--fallback-backend claude` and `--review claude`
 
 The local model is the workhorse (`qwen3-coder:30b` here). Claude is

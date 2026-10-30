@@ -2,9 +2,11 @@
 from .adapters import AgyAgent, AiderAgent, ClaudeCodeAgent, LiteAgent
 from .base import Agent, Attempt, Task
 from .commit import commit_attempt
+from .opencode import OpenCodeAgent
 from .review import REVIEWERS, Reviewer, ReviewTask, Verdict, get_reviewer, parse_verdict
 
-REGISTRY: dict[str, Agent] = {a.name: a for a in (LiteAgent(), AiderAgent(), ClaudeCodeAgent(), AgyAgent())}
+REGISTRY: dict[str, Agent] = {a.name: a for a in (LiteAgent(), AiderAgent(), ClaudeCodeAgent(), AgyAgent(),
+                                                     OpenCodeAgent())}
 DEFAULT = "aider"
 
 

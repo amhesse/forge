@@ -28,8 +28,8 @@ def fake_cfg(values):
 
 
 class TestRegistry(unittest.TestCase):
-    def test_every_old_backend_is_registered(self):
-        self.assertEqual(set(agents.REGISTRY), {"lite", "aider", "claude", "agy"})
+    def test_every_backend_is_registered(self):
+        self.assertEqual(set(agents.REGISTRY), {"lite", "aider", "claude", "agy", "opencode"})
 
     def test_unknown_or_empty_name_gets_aider_like_the_old_fallthrough(self):
         for name in (None, "", "no-such-backend"):

@@ -1,6 +1,6 @@
 # Design: pluggable agents behind the gate
 
-Status: proposal, 2026-10-29. Steps 1, 1b, 2 and 3 are built (branch `pluggable-agents`); the rest is not.
+Status: proposal, 2026-10-29. Steps 1 to 4 are built (branch `pluggable-agents`); 5 and 6 are not.
 
 ## Why
 
@@ -137,7 +137,7 @@ worktree, and the same gate.
 - the worktree is bind-mounted read-write;
 - the rest of `$HOME` is not mounted;
 - `/usr` is read-only;
-- network goes only to the model endpoint.
+- network is shared (bwrap can't limit it to the model endpoint; see step 4).
 
 The Qwen Code evaluation already used this pattern. The project's validate
 commands run outside it, under forge, as now.
@@ -181,7 +181,19 @@ commands run outside it, under forge, as now.
    - Preflight accepts a scoped item.
    - 187 tests pass, 15 of them new in `tests/test_scope.py`, including two
      real `forge run`s.
-4. **`OpenCodeAgent` and the sandbox wrapper.**
+4. **`OpenCodeAgent` and the sandbox wrapper.** *Done 2026-10-29*
+   (`agents/opencode.py`, `agents/sandbox.py`).
+   - OpenCode runs as `opencode run --format json --auto`, under bwrap, with
+     its whole config passed in `OPENCODE_CONFIG_CONTENT`.
+   - The network is shared, not filtered to the model endpoint; that's a
+     known gap, documented.
+   - Tested end to end with no GPU: the real `forge run`, the real OpenCode
+     binary and the real sandbox, against a scripted fake model server
+     (`tests/fake_openai.py`). Work inside the scope merged, a shell edit
+     outside it was put back, a write to the real home directory never
+     arrived, and a model that never edits was parked.
+   - 196 tests pass.
+   - Still to do: a run against a real local model on the 3090.
 5. **The routing and escalation config.**
 6. **Leash: every agent through the same gate.** Report solved, wrong merged
    and parked per agent, on the honest set and on a SWE-bench Verified subset.

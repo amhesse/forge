@@ -1023,14 +1023,16 @@ def main(argv: list[str] | None = None) -> int:
                          help="Keep the per-item branch even for items that passed and merged "
                               "(a failed item's branch is always kept - it's the only copy of "
                               "what the model produced).")
-    parser.add_argument("--backend", default=None, choices=["aider", "lite", "claude", "agy"],
+    parser.add_argument("--backend", default=None, choices=sorted(agents.REGISTRY),
                          help="Which editing backend to use, overriding [model] backend in "
                               ".aiderloop.toml. 'aider' (the default) shells out to aider; "
                               "'lite' uses lite_editor.py, built for exactly this loop's usage - "
                               "it decides the file set in Python before calling the model and asks "
                               "for whole-file content rather than a diff, so SEARCH/REPLACE "
                               "mismatches, file-selection reflection loops and invented filenames "
-                              "are all structurally impossible. See its module docstring.")
+                              "are all structurally impossible. See its module docstring. "
+                              "'opencode' runs OpenCode, which explores the repo and runs commands, "
+                              "inside a bubblewrap sandbox (agents/opencode.py).")
     parser.add_argument("--models", default=None, type=str,
                          help="Comma-separated ollama model name(s), overriding .aider.conf.yml's "
                               "model: key. One name runs sequentially as before, just with that "
@@ -1041,7 +1043,7 @@ def main(argv: list[str] | None = None) -> int:
                          help="Model to escalate to if the primary model fails validation/review on an item. "
                               "Particularly useful when a fast coder model repeatedly chokes on syntax errors "
                               "and a heavier reasoning model is needed to unblock it.")
-    parser.add_argument("--fallback-backend", default="aider", choices=["aider", "lite", "claude", "agy"],
+    parser.add_argument("--fallback-backend", default="aider", choices=sorted(agents.REGISTRY),
                          help="Editing backend for the fallback (default: aider). `claude` hands a parked "
                               "item to the Claude Code CLI (`claude -p`, billed to your subscription, "
                               "never the API) - --fallback-model is then optional and names a Claude "
