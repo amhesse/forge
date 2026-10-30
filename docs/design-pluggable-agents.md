@@ -1,6 +1,6 @@
 # Design: pluggable agents behind the gate
 
-Status: proposal, 2026-10-29. Nothing here is built yet.
+Status: proposal, 2026-10-29. Step 1 is built (branch `pluggable-agents`); the rest is not.
 
 ## Why
 
@@ -25,12 +25,11 @@ model" is a position no mainstream harness takes.
 - `runner._dispatch_editor` (runner.py:365) is an `if` chain over four
   backends: `claude`, `agy`, `lite`, and `aider` as the fallthrough. Each
   returns `(success, output)`.
-- Token usage comes back through module-level globals:
-  `claude_editor.last_usage()`, `agy_editor.last_usage()`,
-  `lite_editor.last_usage()` and `lite_editor.last_thinking()`. Parallel
-  workers are threads (`run_parallel`, `ThreadPoolExecutor`), so concurrent
-  items can read each other's usage or thinking. This is likely to happen,
-  but it hasn't been reproduced.
+- Token usage comes back through `last_usage()` functions. `lite_editor`
+  already keeps its usage per thread, but `claude_editor` and `agy_editor`
+  used module globals. Parallel workers are threads (`run_parallel`,
+  `ThreadPoolExecutor`), so concurrent Claude or agy items could read each
+  other's counts. (Fixed in step 1.)
 - The adapters disagree about who commits: lite and claude commit
   themselves, while aider commits through its own settings.
 - `run_review_gate` (runner.py:519) is a second `if` chain over `claude`,
@@ -145,10 +144,13 @@ commands run outside it, under forge, as now.
 ## Migration, one behaviour-preserving step at a time
 
 1. **Registry and the four existing adapters.** `_dispatch_editor` becomes a
-   registry lookup. Usage and thinking move into `Attempt`, which fixes the
-   thread race. The supervisor takes over committing.
-   *Proof that behaviour didn't change:* forge's tests, plus a Leash rerun of a
-   small honest subset per backend that matches the previous numbers.
+   registry lookup, and usage comes back in `Attempt`. Claude and agy usage
+   become per thread. *Done 2026-10-29:* all 135 existing tests pass, plus
+   12 new ones in `tests/test_agents.py`. Still to do: a Leash rerun of a
+   small honest subset per backend, which needs the 3090.
+1b. **The supervisor commits.** Adapters stop committing. Kept separate from
+   step 1 because it changes what lands in git history (commit messages), so
+   step 1 could stay a pure refactor.
 2. **The Reviewer protocol.** Replace `run_review_gate`'s chain and the copied
    verdict parsing, and default to diff only.
 3. **Scope policy** for the scoped and unscoped items above.

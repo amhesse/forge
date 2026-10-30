@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import agy_editor, claude_editor, config, lite_editor
+from . import agents, agy_editor, claude_editor, config, lite_editor
 from . import worktree as wt
 from .config import (
     CONFIG_FILENAME,
@@ -367,79 +367,23 @@ def _dispatch_editor(project_dir: Path, item_text: str, log_path: Path,
                      backend_override: str | None = None,
                      hard_item: bool | None = None,
                      force_think_off: bool = False) -> tuple[bool, str, dict]:
-    """Dispatches to whichever editing backend the project asked for.
+    """Hands the item to whichever agent the project asked for:
+    --backend / `[model] backend` in .aiderloop.toml, default aider (see
+    forge.agents.get_agent). Each agent is a thin adapter over the editor
+    module that does the work (lite_editor, aider, claude_editor,
+    agy_editor); this function only builds the Task.
 
-    `[model] backend = "lite"` in .aiderloop.toml (or --backend lite)
-    swaps aider for lite_editor, which is built for exactly this loop's
-    usage and structurally can't hit three failure classes aider produced
-    on this project's real runs - see lite_editor's module docstring.
-    Defaults to "aider", so a project that says nothing keeps the
-    behaviour it already had.
-
-    lite_editor always needs an explicit model: it has no
-    .aider.conf.yml to fall back on the way aider does, so a run without
-    --models falls back to `[model] author`, which projects using this
-    loop already set for the context check.
-
-    Returns (success, output, usage) - usage is real token counts from
-    Ollama's own response for `lite`, a parse of aider's own printed
-    summary for `aider`. "Cost" here means tokens spent, not money: these
-    are local models with no per-token bill, so the point of tracking
-    this is knowing where compute went (which items were expensive,
-    whether a retry was worth it), not a dollar figure.
+    Returns (success, output, usage). "Cost" here means tokens spent, not
+    money: local models have no per-token bill, so the point is knowing
+    where compute went, not a dollar figure.
     """
     backend = backend_override if backend_override else cfg("model", "backend", default="aider")
-    if backend == "claude":
-        success, output = claude_editor.run_claude_on_item(
-            project_dir, item_text, lambda m: log(m, log_path), files=files, model=model)
-        return success, output, claude_editor.last_usage()
-    if backend == "agy":
-        success, output = agy_editor.run_agy_on_item(
-            project_dir, item_text, lambda m: log(m, log_path), files=files, model=model)
-        return success, output, agy_editor.last_usage()
-    if backend == "lite":
-        # Default (lite_editor.DEFAULT_NUM_PREDICT, 8000) is sized for
-        # editing existing files, where a genuinely large rewrite is
-        # plausible. A project whose items generate NEW, bounded-length
-        # content (measured: real successes here used 400-900 completion
-        # tokens) should set this lower - a runaway generation that never
-        # reaches a natural stop then fails in ~15s instead of burning
-        # the full budget. Measured directly: one item took 140s and
-        # 16,000 tokens (two attempts at the 8000 cap) before parking,
-        # having produced nothing usable either time.
-        kwargs = {}
-        num_predict = cfg("model", "lite_num_predict", default=None)
-        if num_predict:
-            kwargs["num_predict"] = num_predict
-        # Hard-item overrides. Both exist because of one measured failure
-        # (see lite_editor.OUTPUT_BUDGET_DIRECTIVE): on an open-ended
-        # algorithmic item the model can spend the whole budget reasoning
-        # and emit no file block at all. They are deliberately scoped to
-        # hard items - an exact-spec item transcribes rather than decides,
-        # which is the case this harness is already reliable on, and there
-        # is no reason to spend more tokens or change its prompt.
-        if hard_item is None:
-            hard_item = estimate_difficulty(item_text) == DIFFICULTY_HARD
-        if hard_item:
-            hard_np = cfg("model", "lite_hard_num_predict", default=None)
-            if hard_np:
-                kwargs["num_predict"] = hard_np
-            if cfg("model", "lite_hard_budget_directive", default=False):
-                kwargs["budget_directive"] = True
-            if cfg("model", "lite_hard_think_off", default=False):
-                kwargs["think"] = False
-        # Set by the retry loop after an attempt was truncated mid-reasoning
-        # without producing a file block. Applies whatever the item's
-        # difficulty, because at this point it is not a guess about the item
-        # - it is a measured fact about what the last attempt did.
-        if force_think_off:
-            kwargs["think"] = False
-        success, output = lite_editor.run_lite_on_item(
-            project_dir, item_text, log_path, files=files,
-            model=model or cfg("model", "author"), **kwargs)
-        return success, output, lite_editor.last_usage()
-    success, output = run_aider_on_item(project_dir, item_text, log_path, files=files, model=model)
-    return success, output, parse_aider_token_line(output)
+    if hard_item is None:
+        hard_item = estimate_difficulty(item_text) == DIFFICULTY_HARD
+    task = agents.Task(text=item_text, worktree=project_dir, log_path=log_path, files=files,
+                       model=model, hard=hard_item, think_off=force_think_off)
+    result = agents.get_agent(backend).attempt(task, lambda m: log(m, log_path))
+    return result.ok, result.output, result.usage
 
 
 def _accumulate_usage(record: dict, usage: dict, model: str | None = None) -> None:

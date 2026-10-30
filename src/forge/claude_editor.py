@@ -17,6 +17,7 @@ import ipaddress
 import json
 import os
 import subprocess
+import threading
 import urllib.parse
 from pathlib import Path
 
@@ -28,11 +29,13 @@ DEFAULT_TIMEOUT = 1800
 EDIT_TOOLS = "Read,Edit,Write,Glob,Grep"
 REVIEW_TOOLS = "Read,Glob,Grep"
 
-_last_usage: dict = {}
+# Per thread, like lite_editor's: parallel workers are threads, and a module
+# global let one item read another's token counts.
+_usage_local = threading.local()
 
 
 def last_usage() -> dict:
-    return dict(_last_usage)
+    return dict(getattr(_usage_local, "usage", {}))
 
 
 def _is_loopback_endpoint(url: str) -> bool:
@@ -87,8 +90,7 @@ def _env() -> dict:
 def _run(cwd: Path, prompt: str, tools: str, model: str | None,
          timeout: int, log) -> tuple[bool, str]:
     """One `claude -p` call. Returns (ok, result text) and records usage."""
-    global _last_usage
-    _last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
+    _usage_local.usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
     cmd = [CLAUDE_BIN, "-p", "--output-format", "json",
            "--permission-mode", "acceptEdits", "--allowedTools", tools]
     if model:
@@ -109,7 +111,7 @@ def _run(cwd: Path, prompt: str, tools: str, model: str | None,
         log(f"claude -p returned non-JSON output (exit {result.returncode}): {out[-1000:]}")
         return False, out
     usage = data.get("usage") or {}
-    _last_usage = {
+    _usage_local.usage = {
         "prompt_tokens": int(usage.get("input_tokens", 0))
                          + int(usage.get("cache_read_input_tokens", 0))
                          + int(usage.get("cache_creation_input_tokens", 0)),

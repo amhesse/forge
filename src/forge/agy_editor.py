@@ -43,6 +43,7 @@ import re
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 AGY_BIN = "agy"
@@ -51,17 +52,18 @@ DEFAULT_TIMEOUT = 1800
 _PROCESS_GRACE = 60
 _PRINT_TIMEOUT_RE = re.compile(r"print timeout after (\S+) with turn in progress")
 
-_last_usage: dict = {}
+# Per thread, like lite_editor's: parallel workers are threads, and a module
+# global let one item read another's token counts.
+_usage_local = threading.local()
 
 
 def last_usage() -> dict:
-    return dict(_last_usage)
+    return dict(getattr(_usage_local, "usage", {}))
 
 
 def _run(cwd: Path, prompt: str, model: str | None, timeout: int, log) -> tuple[bool, str]:
     """One `agy` print-mode call. Returns (ok, response text) and records usage."""
-    global _last_usage
-    _last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
+    _usage_local.usage = {"prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
     cmd = [AGY_BIN, "--mode", "accept-edits", "--sandbox", "--output-format", "json",
            "--print-timeout", f"{timeout}s"]
     if model:
@@ -88,7 +90,7 @@ def _run(cwd: Path, prompt: str, model: str | None, timeout: int, log) -> tuple[
         log(f"agy returned non-JSON output (exit {result.returncode}): {out[-1000:]}")
         return False, out
     usage = data.get("usage") or {}
-    _last_usage = {
+    _usage_local.usage = {
         "prompt_tokens": int(usage.get("input_tokens", 0)) + int(usage.get("cache_read_tokens", 0)),
         "completion_tokens": int(usage.get("output_tokens", 0)) + int(usage.get("thinking_tokens", 0)),
         "seconds": float(data.get("duration_seconds") or 0),
