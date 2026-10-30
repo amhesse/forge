@@ -586,6 +586,27 @@ def unscoped_item_problem(args) -> str | None:
     return "names no file and declares no scope ([scope] unscoped = \"refuse\")"
 
 
+def tdd_exploring_problem(args, backend_override: str | None) -> str | None:
+    """Why an exploring agent may not take this TDD item, or None.
+
+    On a TDD item the agent writes the test, then the implementation, and
+    the gate checks the test failed before and passes after. That can't see
+    a test that agrees with a wrong implementation. On the Leash honest set
+    (2026-10-30), exploring agents merged 3 wrong TDD changes in 96 trials
+    (OpenCode 2, Claude Code 1, e.g. cents read as dollars, in the test and
+    the code alike), while lite and aider merged none. A reviewer reading the
+    task beside the diff can see it, and the review gate's TDD instruction
+    asks exactly that. So an exploring agent takes a TDD item only with
+    --review, unless the project sets [tdd] exploring_without_review."""
+    agent = agents.get_agent(backend_override or cfg("model", "backend", default="aider"))
+    if "explores" not in agent.traits or getattr(args, "review", None):
+        return None
+    if cfg("tdd", "exploring_without_review", default=False):
+        return None
+    return (f"a TDD item taken by an exploring agent ({agent.name}) needs --review: its own test can "
+            f"agree with its own wrong code, and only a reviewer reading the task can tell")
+
+
 def process_item(project_dir: Path, item: TodoItem, index: int,
                  args, log_path: Path, model: str | None = None,
                  git_lock: threading.RLock | None = None,
@@ -668,6 +689,12 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
 
     val_budget = validation_retries_for(args, item.text)
     record["validation_retry_budget"] = val_budget
+
+    if is_tdd_item(item.text):
+        blocked = tdd_exploring_problem(args, backend_override)
+        if blocked:
+            log(f"{blocked}. Parking: {item.text}", log_path)
+            return finish(STATUS_NEEDS_REVIEW, blocked)
 
     # A TDD item's red/green phases can't be replayed on top of an attempt
     # that already wrote the test, so repair takes the single-pass path with

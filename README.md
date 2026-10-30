@@ -72,8 +72,11 @@ was no review gate and no escalation, so this is the checks alone.
   forge checks that the test failed before the change and passed after. It
   can't know the test itself is wrong. The review gate, whose prompt has an
   instruction for exactly this, wasn't on in these runs.
-- So, until this is closed, send TDD items to lite, or run exploring agents
-  with `--review`.
+- So forge now holds that line itself. An exploring agent takes a TDD item
+  only with `--review`. Without one, the item is parked with the reason, and
+  `[tdd] exploring_without_review = true` opts out. With `[agents]` routing, a
+  TDD item names its files and goes to `exact` (lite) anyway. The rule
+  matters most when an item escalates to an exploring agent.
 - All local runs used one RTX 3090 Ti. Claude Code and agy ran on
   subscriptions, not metered APIs.
 
