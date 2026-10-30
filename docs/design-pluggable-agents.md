@@ -147,8 +147,16 @@ commands run outside it, under forge, as now.
 1. **Registry and the four existing adapters.** `_dispatch_editor` becomes a
    registry lookup, and usage comes back in `Attempt`. Claude and agy usage
    become per thread. *Done 2026-10-29:* all 135 existing tests pass, plus
-   12 new ones in `tests/test_agents.py`. Still to do: a Leash rerun of a
-   small honest subset per backend, which needs the 3090.
+   12 new ones in `tests/test_agents.py`. **Leash A/B on the 3090, steps 1-5
+   vs master** (qwen3.8:27b, lite, all 16 tasks x 2 trials, no escalation):
+   - master: 29/32 passed, 0 wrong merged, catch 100%, friction 0%,
+     median 29.9 s;
+   - branch: 28/32 passed, 0 wrong merged, catch 100%, friction 0%,
+     median 25.6 s.
+
+   The one difference is a single `tdd_average_transaction` trial whose
+   model output was wrong on the branch and right on master. forge caught it
+   either way, so it's model variance, not a behaviour change.
 1b. **The supervisor commits.** Adapters stop committing; forge stages and
    commits after every attempt (`agents/commit.py`), keeping each agent's old
    message prefix. It never stages the untracked config and links
@@ -193,7 +201,13 @@ commands run outside it, under forge, as now.
      outside it was put back, a write to the real home directory never
      arrived, and a model that never edits was parked.
    - 196 tests pass.
-   - Still to do: a run against a real local model on the 3090.
+   - **Real run (2026-10-29), qwen3.8-64k on the 3090 through Ollama's
+     /v1:** two scoped items on a small game project, both merged in about
+     80 s, 5 tool steps each. A hidden grader the agent never saw passed 3/3.
+     Only files inside the scope changed, and the tests were untouched.
+     Ollama's tool calling worked. The first attempt, under systemd, parked
+     both items without logging why: `opencode` wasn't on systemd's PATH.
+     Every refusal is now logged.
 5. **The routing and escalation config.** *Done 2026-10-29*
    (`agents/routing.py`, `runner.run_routed`).
    - The sequential and parallel loops share one routed path. Without

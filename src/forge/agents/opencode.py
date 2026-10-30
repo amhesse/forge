@@ -136,15 +136,21 @@ class OpenCodeAgent:
 
     def attempt(self, task: Task, log) -> Attempt:
         start = time.monotonic()
+        def refuse(why: str) -> Attempt:
+            # Said in the log, not only returned: a run under systemd, whose
+            # PATH lacks ~/.npm-global/bin, parked items with no reason shown.
+            log(f"[opencode] not run: {why}")
+            return Attempt(False, why)
+
         if not sandbox.available():
-            return Attempt(False, "opencode runs only sandboxed, and bwrap (bubblewrap) is not installed")
+            return refuse("opencode runs only sandboxed, and bwrap (bubblewrap) is not installed")
         binary = opencode_binary()
         if binary is None:
-            return Attempt(False, "opencode is not installed (not on PATH)")
+            return refuse("opencode is not on PATH")
         try:
             _, model_name = provider_model(task.model)
         except ValueError as e:
-            return Attempt(False, str(e))
+            return refuse(str(e))
         env = {"OPENCODE_CONFIG_CONTENT": json.dumps(config_for(model_name)),
                "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1",
                "OPENCODE_DISABLE_LSP_DOWNLOAD": "1", "OPENCODE_DISABLE_CLAUDE_CODE": "1"}
@@ -156,8 +162,9 @@ class OpenCodeAgent:
                                  task.worktree, ro=[binary.parent, USER_CONFIG_DIR / "node_modules"],
                                  env=env, home_setup=_home_setup, timeout=timeout, done_when=final_answer)
         except FileNotFoundError as e:
-            return Attempt(False, str(e))
+            return refuse(str(e))
         except Exception as e:  # subprocess.TimeoutExpired and friends: the attempt failed
+            log(f"[opencode] did not finish: {e}")
             return Attempt(False, f"opencode did not finish: {e}")
         text, usage, errors = parse_events(result.stdout)
         usage["seconds"] = round(time.monotonic() - start, 1)

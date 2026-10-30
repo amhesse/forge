@@ -64,11 +64,22 @@ class TestPieces(unittest.TestCase):
         self.assertIn("Only modify these file(s): README.md; and files matching: src/game/**", p)
         self.assertIn("Do not commit", p)
 
-    def test_refuses_to_run_without_the_sandbox(self):
+    def test_refuses_to_run_without_the_sandbox_and_says_so_in_the_log(self):
+        logged = []
         with mock.patch.object(sandbox, "available", return_value=False):
-            a = agents.get_agent("opencode").attempt(agents.Task(text="t", worktree=Path("/w"), log_path=Path("/l")), print)
+            a = agents.get_agent("opencode").attempt(agents.Task(text="t", worktree=Path("/w"), log_path=Path("/l")),
+                                                     logged.append)
         self.assertFalse(a.ok)
         self.assertIn("only sandboxed", a.output)
+        self.assertTrue(any("not run" in m and "only sandboxed" in m for m in logged), logged)
+
+    def test_not_on_path_is_logged(self):
+        # Seen live: under systemd (no ~/.npm-global/bin on PATH) items parked with no reason in the log.
+        logged = []
+        with mock.patch.object(opencode, "opencode_binary", return_value=None):
+            agents.get_agent("opencode").attempt(agents.Task(text="t", worktree=Path("/w"), log_path=Path("/l")),
+                                                 logged.append)
+        self.assertTrue(any("not on PATH" in m for m in logged), logged)
 
     def test_registered_with_the_right_traits(self):
         self.assertEqual(agents.get_agent("opencode").traits, frozenset({"explores", "runs_shell", "local"}))
