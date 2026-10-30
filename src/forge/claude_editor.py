@@ -1,7 +1,8 @@
 """Escalation backend: hand an item to the Claude Code CLI (`claude -p`).
 
 Used as `--fallback-backend claude` (retry an item the local model
-parked) and `--review claude` (a second opinion on a diff before merge).
+parked) and, through agents/review.py, `--review claude` (a second opinion
+on a diff before merge).
 Neither replaces a check: whatever Claude writes still goes through the
 same scope, leakage, syntax and validate gates as a local model's work,
 because it runs in the same per-item worktree.
@@ -142,55 +143,3 @@ def run_claude_on_item(worktree: Path, item_text: str, log, files: list[str] | N
     # files outside the item's scope are put back by restore_unnamed_files.
     log(f"[claude] finished: {text.strip()[-300:]}")
     return True, text
-
-
-def review_diff(worktree: Path, item_text: str, diff: str, log,
-                model: str | None = None, timeout: int = 600, tdd: bool = False
-                ) -> tuple[bool | None, str]:
-    """Returns (approved, feedback). approved is None if the review itself failed.
-
-    `tdd=True` adds an extra instruction found necessary by a real case,
-    not a hypothetical one: a TDD item can merge a wrong implementation
-    that passes its OWN red-phase test, when that test is narrower than
-    the task it's supposed to verify (measured directly: tdd_budget's
-    self-written test never exercised a category with both income and
-    spending entries, so an implementation that summed both signs passed
-    it while failing the real spec). A generic "is this diff correct"
-    review can miss that, because the diff and its own test agree with
-    each other - the mismatch is between the test and the task, which is
-    exactly what this asks for explicitly instead of leaving implicit."""
-    prompt = ("Review this diff against the task it was meant to implement. You may read "
-              "files in the repository for context. Look for incorrect logic, missed "
-              "requirements and broken behaviour - not style.\n\n")
-    if tdd:
-        prompt += (
-            "This is a TDD item: one of the changed files is a test the same model wrote "
-            "for itself before implementing the rest. Do not just check that the "
-            "implementation passes ITS OWN test - separately check whether that test's "
-            "assertions actually cover every case the task describes (edge cases, boundary "
-            "values, combinations the task mentions - e.g. mixed positive and negative "
-            "values when the task says both matter, empty/missing input if the task "
-            "specifies behavior for it). A test that is narrower than the task can pass "
-            "against a wrong implementation; reject if the test doesn't prove the task is "
-            "actually satisfied, even if the diff currently passes its own test.\n\n"
-        )
-    prompt += ("Explain your reasoning first if you want, but the VERY LAST LINE of your "
-              "reply must be exactly one word, nothing else on that line: APPROVE if it "
-              "correctly implements the task, or REJECT if it doesn't.\n\n"
-              f"Task:\n{item_text}\n\nDiff:\n{diff}")
-    ok, text = _run(worktree, prompt, REVIEW_TOOLS, model, timeout, log)
-    if not ok:
-        return None, text
-    text = text.strip()
-    # Claude doesn't reliably put the verdict on the first line even when
-    # asked to (seen live: reasoning first, APPROVE last) - a naive
-    # first-line check reads that as a rejection and escalates work that
-    # was already fine. Take the last line that is exactly one of the two
-    # words; only genuinely ambiguous output (neither, or reasoning that
-    # happens to end in a line saying something else) falls through to None.
-    for line in reversed(text.splitlines()):
-        word = line.strip().strip(".*_ ").upper()
-        if word in ("APPROVE", "REJECT"):
-            return word == "APPROVE", text
-    log(f"claude review gave no clear APPROVE/REJECT verdict: {text[-500:]}")
-    return None, text

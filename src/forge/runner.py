@@ -514,32 +514,12 @@ def run_review_gate(worktree_path: Path, base: str, item_text: str, expected: li
         diff = subprocess.run(["git", "-C", str(worktree_path), "diff", base, "HEAD"],
                               capture_output=True, text=True).stdout
         log(f"Asking {reviewer} to review the diff...", log_path)
-        if reviewer == "claude":
-            approved, feedback = claude_editor.review_diff(
-                worktree_path, item_text, diff, lambda m: log(m, log_path),
-                model=getattr(args, "review_model", None), tdd=tdd)
-        elif reviewer == "ollama":
-            from . import spec_compiler
-            model_name = getattr(args, "review_model", None) or "qwen3-coder:30b"
-            prompt = f"Review this diff for the task below. The VERY LAST LINE of your reply must be exactly one word: APPROVE if it's correct, REJECT if not (with your reasons above it).\n\nTask:\n{item_text}\n\nDiff:\n{diff}"
-            try:
-                out = spec_compiler.call_ollama(model=model_name, prompt=prompt, url=spec_compiler.DEFAULT_OLLAMA_URL, num_ctx=4096, num_predict=2048, timeout=90.0).strip()
-                last = out.splitlines()[-1].strip().upper() if out else ""
-                approved, feedback = (last == "APPROVE" or (last != "REJECT" and out.upper().startswith("APPROVE"))), out
-            except Exception as e:
-                approved, feedback = None, str(e)
-        else:
-            try:
-                out = subprocess.run(["agy", "--print",
-                                      f"Review this diff for the task below. The VERY LAST LINE of your "
-                                      f"reply must be exactly one word: APPROVE if it's correct, REJECT "
-                                      f"if not (with your reasons above it).\n\nTask:\n{item_text}"
-                                      f"\n\nDiff:\n{diff}"],
-                                     capture_output=True, text=True, check=True).stdout.strip()
-                last = out.splitlines()[-1].strip().upper() if out else ""
-                approved, feedback = (last == "APPROVE" or (last != "REJECT" and out.upper().startswith("APPROVE"))), out
-            except (OSError, subprocess.CalledProcessError) as e:
-                approved, feedback = None, str(e)
+        # Task and diff only, never the doer's reasoning (forge.agents.review)
+        verdict = agents.get_reviewer(reviewer).review(
+            agents.ReviewTask(text=item_text, diff=diff, worktree=worktree_path, tdd=tdd,
+                              model=getattr(args, "review_model", None)),
+            lambda m: log(m, log_path))
+        approved, feedback = verdict.approved, verdict.feedback
         if approved:
             log(f"{reviewer} approved the changes.", log_path)
             record["review"] = {"reviewer": reviewer, "rounds": review_attempt + 1}
@@ -1028,7 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
                               "never the API) - --fallback-model is then optional and names a Claude "
                               "model such as sonnet or opus. `agy` does the same through the agy CLI, "
                               "with --fallback-model naming one of `agy models`, e.g. gemini-3.8-flash-high.")
-    parser.add_argument("--review", choices=["claude", "agy", "ollama"], default=None,
+    parser.add_argument("--review", choices=sorted(agents.REVIEWERS), default=None,
                          help="Have a second model review each passing diff before it merges; a "
                               "rejection is fed back to the editor for up to --max-validation-retries "
                               "rounds.")

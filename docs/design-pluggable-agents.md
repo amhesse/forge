@@ -1,6 +1,6 @@
 # Design: pluggable agents behind the gate
 
-Status: proposal, 2026-10-29. Steps 1 and 1b are built (branch `pluggable-agents`); the rest is not.
+Status: proposal, 2026-10-29. Steps 1, 1b and 2 are built (branch `pluggable-agents`); the rest is not.
 
 ## Why
 
@@ -156,7 +156,19 @@ commands run outside it, under forge, as now.
    there is usually nothing left for forge to commit. *Done 2026-10-29:* 154
    tests pass, including the end-to-end `forge run` hook tests.
 2. **The Reviewer protocol.** Replace `run_review_gate`'s chain and the copied
-   verdict parsing, and default to diff only.
+   verdict parsing. *Done 2026-10-29* (`agents/review.py`): one prompt and one
+   verdict parser for claude, ollama and agy. Reviewers never got the doer's
+   reasoning before either; now `ReviewTask` has no field for it, so they
+   can't. Changes ollama and agy reviews see:
+   - They now get the TDD instruction, which only claude got before.
+   - They use claude's robust parser. A verdict wrapped in markdown now
+     counts. A reply with no clear verdict now parks for a human instead of
+     counting as a reject.
+   - agy reviews inside the worktree; before, it ran in forge's own directory.
+   - ollama warns when the prompt is bigger than its 4096-token context
+     (Ollama cuts it silently), and `[review] ollama_num_ctx` raises it.
+   172 tests pass, 18 of them new in `tests/test_review.py`, including the
+   gate's approve, reject and couldn't-run paths.
 3. **Scope policy** for the scoped and unscoped items above.
 4. **`OpenCodeAgent` and the sandbox wrapper.**
 5. **The routing and escalation config.**
