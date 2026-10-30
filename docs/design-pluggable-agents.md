@@ -1,6 +1,6 @@
 # Design: pluggable agents behind the gate
 
-Status: proposal, 2026-10-29. Steps 1 to 4 are built (branch `pluggable-agents`); 5 and 6 are not.
+Status: proposal, 2026-10-29. Steps 1 to 5 are built (branch `pluggable-agents`); 6 is not.
 
 ## Why
 
@@ -194,7 +194,20 @@ commands run outside it, under forge, as now.
      arrived, and a model that never edits was parked.
    - 196 tests pass.
    - Still to do: a run against a real local model on the 3090.
-5. **The routing and escalation config.**
+5. **The routing and escalation config.** *Done 2026-10-29*
+   (`agents/routing.py`, `runner.run_routed`).
+   - The sequential and parallel loops share one routed path. Without
+     `[agents]`, they behave as before.
+   - An explicit `--backend` wins over exact/explore.
+   - A typo in `[agents]` stops the run up front, instead of silently
+     becoming aider.
+   - 206 tests pass, including real `forge run`s for routing by kind,
+     escalation, and a misspelled name.
+   - **Hang found and fixed.** The OpenCode end-to-end tests hung whenever
+     the run's own stdin was an open pipe: `opencode run` reads stdin when
+     it isn't a terminal, and the sandbox passed forge's stdin through. The
+     sandbox now gives the agent an empty stdin. It also stops a sandbox
+     that's still running 10 s after the agent's final answer.
 6. **Leash: every agent through the same gate.** Report solved, wrong merged
    and parked per agent, on the honest set and on a SWE-bench Verified subset.
    That table is the public claim.

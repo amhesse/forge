@@ -104,6 +104,17 @@ def parse_events(stdout: str) -> tuple[str, dict, list[str]]:
     return (texts[-1] if texts else ""), usage, errors
 
 
+def final_answer(line: str) -> bool:
+    """A step that ended for a reason other than calling tools is the model's
+    last word; tool steps end with "tool-calls"."""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    part = event.get("part") or {}
+    return event.get("type") == "step_finish" and part.get("reason") not in (None, "tool-calls")
+
+
 def _home_setup(home: Path) -> None:
     """The throwaway home gets OpenCode's provider packages (linked, read-only)
     and a copy of its cache, so nothing is downloaded and nothing of the
@@ -143,7 +154,7 @@ class OpenCodeAgent:
             result = sandbox.run([str(binary), "run", "--format", "json", "--auto",
                                   "--model", f"forge/{model_name}", build_prompt(task)],
                                  task.worktree, ro=[binary.parent, USER_CONFIG_DIR / "node_modules"],
-                                 env=env, home_setup=_home_setup, timeout=timeout)
+                                 env=env, home_setup=_home_setup, timeout=timeout, done_when=final_answer)
         except FileNotFoundError as e:
             return Attempt(False, str(e))
         except Exception as e:  # subprocess.TimeoutExpired and friends: the attempt failed

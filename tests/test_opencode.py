@@ -6,6 +6,7 @@ need no GPU but do need opencode and bwrap installed (skipped otherwise).
 """
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,14 @@ class TestPieces(unittest.TestCase):
         self.assertEqual(usage, {"prompt_tokens": 350, "completion_tokens": 35, "steps": 2})
         self.assertEqual(errors, [])
         self.assertTrue(opencode.parse_events(json.dumps({"type": "error", "error": {"m": "x"}}))[2])
+
+    def test_final_answer_is_a_step_that_ended_without_calling_tools(self):
+        line = lambda reason: json.dumps({"type": "step_finish", "part": {"reason": reason}})
+        self.assertTrue(opencode.final_answer(line("stop")))
+        self.assertTrue(opencode.final_answer(line("length")))
+        self.assertFalse(opencode.final_answer(line("tool-calls")))
+        self.assertFalse(opencode.final_answer(json.dumps({"type": "text", "part": {"text": "x"}})))
+        self.assertFalse(opencode.final_answer("not json"))
 
     def test_model_names(self):
         self.assertEqual(opencode.provider_model("qwen3.8-64k"), ("forge", "qwen3.8-64k"))
@@ -80,6 +89,29 @@ class TestSandbox(unittest.TestCase):
             self.assertIn("Read-only", r.stdout)
 
 
+    def test_a_sandbox_that_lingers_after_the_final_answer_is_stopped(self):
+        # The hang seen live: the agent had exited, bwrap had not.
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            t = time.monotonic()
+            r = sandbox.run(["sh", "-c", "echo FINAL; sleep 300 & sleep 300"], Path(tmp), timeout=60,
+                            done_when=lambda line: "FINAL" in line, grace=1)
+            self.assertLess(time.monotonic() - t, 15)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("stopped it", r.stderr)
+
+    def test_the_agent_never_inherits_stdin(self):
+        # `cat` would wait forever on an inherited stdin that stays open.
+        with tempfile.TemporaryDirectory() as tmp:
+            r = sandbox.run(["cat"], Path(tmp), timeout=10)
+            self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_a_hard_timeout_still_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                sandbox.run(["sleep", "300"], Path(tmp), timeout=1)
+
+
 @unittest.skipUnless(HAVE_REAL, "needs opencode and bwrap")
 class OpenCodeEndToEnd(unittest.TestCase):
     """The real `forge run --backend opencode`, the real OpenCode binary in the
@@ -87,8 +119,21 @@ class OpenCodeEndToEnd(unittest.TestCase):
     with a shell command, tries to escape the sandbox, and stops."""
     setUp = hooks.LeashHookTest.setUp
     init_repo = hooks.LeashHookTest.init_repo
-    forge_run = hooks.LeashHookTest.forge_run
     record = hooks.LeashHookTest.record
+
+    def forge_run(self, *extra):
+        """hooks' forge_run, but a hang fails with what forge was doing.
+        That's how the stdin hang (sandbox.run's docstring) was found: these
+        tests hung whenever the test runner's own stdin was an open pipe."""
+        try:
+            return hooks.LeashHookTest.forge_run(self, *extra)
+        except subprocess.TimeoutExpired:
+            log = self.proj / "aider_loop.log"
+            tail = log.read_text()[-3000:] if log.exists() else "(no forge log)"
+            procs = subprocess.run(["ps", "-eo", "pid,etimes,stat,cmd", "--forest"], capture_output=True,
+                                   text=True).stdout
+            procs = "\n".join(l[:200] for l in procs.splitlines() if any(k in l for k in ("opencode", "bwrap", "forge")))
+            self.fail(f"forge run hung.\n--- forge log tail:\n{tail}\n--- processes:\n{procs}")
 
     def run_with(self, script, todo="- [ ] Add an enemy.\n  scope: src/game/**\n"):
         fake = FakeOpenAI(script)

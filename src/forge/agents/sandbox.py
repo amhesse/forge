@@ -17,8 +17,11 @@ is a known gap, stated rather than hidden. The filesystem is the boundary.
 """
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from .. import worktree as wt
@@ -70,16 +73,69 @@ def bwrap_argv(worktree: Path, home: Path, ro: list[Path] = (),
 
 
 def run(cmd: list[str], worktree: Path, ro: list[Path] = (), env: dict[str, str] | None = None,
-        home_setup=None, timeout: int = 1800) -> subprocess.CompletedProcess:
+        home_setup=None, timeout: int = 1800, done_when=None, grace: float = 10.0
+        ) -> subprocess.CompletedProcess:
     """Runs `cmd` inside the sandbox. `home_setup(home)` can populate the
     throwaway home first (a config file, a cache copy). Raises
     FileNotFoundError if bwrap isn't installed: an agent that runs shell
-    commands never runs unsandboxed (see agents.get_agent)."""
+    commands never runs unsandboxed (see agents.get_agent), and
+    subprocess.TimeoutExpired after `timeout` seconds.
+
+    `done_when(line)` says, from one line of the agent's stdout, that it has
+    given its final answer. From then on the sandbox gets `grace` seconds to
+    exit before it's stopped, so a process the agent left running (a server,
+    a watcher) can't hold finished work until the timeout. Stopping bwrap
+    kills everything in the sandbox (--die-with-parent, and its PID
+    namespace)."""
     if not available():
         raise FileNotFoundError("bwrap (bubblewrap) is not installed; it sandboxes agents that run commands")
     with tempfile.TemporaryDirectory(prefix="forge-sandbox-home-") as tmp:
         home = Path(tmp)
         if home_setup:
             home_setup(home)
-        return subprocess.run(bwrap_argv(worktree, home, list(ro), env) + list(cmd),
-                              capture_output=True, text=True, timeout=timeout)
+        argv = bwrap_argv(worktree, home, list(ro), env) + list(cmd)
+        # stdin is empty, never inherited: `opencode run` reads stdin when it
+        # isn't a terminal, and forge started from a pipe that stays open
+        # (a scheduler, a background job, a test runner) left it waiting on
+        # that pipe forever. That was the hang seen on 2026-10-29.
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+        out, err, done_at = [], [], []
+
+        def read_out():
+            for line in proc.stdout:
+                out.append(line)
+                if done_when and not done_at and done_when(line):
+                    done_at.append(time.monotonic())
+
+        readers = [threading.Thread(target=read_out, daemon=True),
+                   threading.Thread(target=lambda: err.extend(proc.stderr), daemon=True)]
+        for t in readers:
+            t.start()
+        deadline, lingered = time.monotonic() + timeout, False
+        while proc.poll() is None:
+            now = time.monotonic()
+            if done_at and now - done_at[0] > grace:
+                lingered = True
+                _stop(proc)
+                break
+            if now > deadline:
+                _stop(proc)
+                for t in readers:
+                    t.join(timeout=5)
+                raise subprocess.TimeoutExpired(argv, timeout, "".join(out), "".join(err))
+            time.sleep(0.2)
+        for t in readers:
+            t.join(timeout=5)
+        returncode = 0 if lingered else proc.returncode
+        if lingered:
+            err.append(f"\n[forge] the agent finished but the sandbox hadn't exited {grace:.0f}s later; stopped it\n")
+        return subprocess.CompletedProcess(argv, returncode, "".join(out), "".join(err))
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()

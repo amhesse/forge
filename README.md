@@ -633,6 +633,29 @@ item, say), `--backend opencode` hands the item to
   every check (scope, named files, validate, review) runs exactly as for any
   other backend.
 
+## Routing items to agents: `[agents]`
+
+Instead of one `--backend` for the whole run, a project can route each item by
+its kind, and say who takes over when one is parked:
+
+```toml
+[agents]
+exact    = "lite"                  # items that name their files and declare no scope
+explore  = "opencode:qwen3.8-64k"  # items with a `scope:` line, or no named file
+escalate = ["opencode", "claude"]  # tried in order on a parked item, each in a fresh worktree
+review   = "ollama:gemma4:26b"     # the default --review ("reviewer" or "reviewer:model")
+```
+
+- An entry is `"backend"` or `"backend:model"`. Ollama tags keep their own
+  colons (`"ollama:gemma4:26b"`).
+- Escalation never hands an item straight back to the agent that just
+  parked it, and every attempt goes through the same checks.
+- An explicit `--backend` or `--review` on the command line wins over this
+  section.
+- A misspelled agent or reviewer name stops the run before any item starts.
+- Without an `[agents]` section, nothing changes: one backend, and at most one
+  `--fallback-backend` / `--fallback-model`.
+
 ## Escalating to Claude: `--fallback-backend claude` and `--review claude`
 
 The local model is the workhorse (`qwen3-coder:30b` here). Claude is

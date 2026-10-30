@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import agents, agy_editor, claude_editor, config, lite_editor
+from .agents import routing
 from . import worktree as wt
 from .config import (
     CONFIG_FILENAME,
@@ -865,6 +866,62 @@ def process_item(project_dir: Path, item: TodoItem, index: int,
         return finish(STATUS_DONE, "passed every check and was merged")
 
 
+def run_routed(project_dir: Path, item: TodoItem, index: int, args, log_path: Path,
+               model: str | None = None, git_lock: threading.RLock | None = None,
+               tag: str = "") -> tuple[str, dict]:
+    """process_item through the routing in forge.agents.routing: the first
+    agent from [agents] exact/explore (unless --backend was given), then,
+    while the item stays parked, each agent of [agents] escalate in turn, in
+    a fresh worktree. With no [agents] section this is the old behaviour:
+    one try, then at most one --fallback-backend / --fallback-model."""
+    prefix = f"[{tag}] " if tag else ""
+    first = routing.first_step(item.text, model, explicit_backend=bool(getattr(args, "backend", None)))
+    if first.label:
+        log(f"{prefix}Routing to {first.label}", log_path)
+    status, record = process_item(project_dir, item, index, args, log_path, model=first.model,
+                                  git_lock=git_lock, backend_override=first.backend)
+    if first.backend:
+        record["agent"] = first.backend
+    tried = []
+    for step in routing.escalation_steps(args, first):
+        if status == STATUS_DONE:
+            break
+        log(f"{prefix}{first.label or first.model or 'the first attempt'} failed [{status}]. "
+            f"Escalating to {step.label}...", log_path)
+        status, record = process_item(project_dir, item, index, args, log_path, model=step.model,
+                                      git_lock=git_lock, backend_override=step.backend)
+        record["fallback_used"] = step.label
+        tried.append(step.label)
+    if len(tried) > 1:
+        record["escalations"] = tried
+    return status, record
+
+
+def check_agents_config() -> list[str]:
+    """Problems with [agents], found before any item runs: an unknown name
+    would otherwise quietly fall back to aider (get_agent's default)."""
+    problems = []
+    entries = [("exact", cfg("agents", "exact", default=None)), ("explore", cfg("agents", "explore", default=None))]
+    chain = cfg("agents", "escalate", default=None) or []
+    entries += [("escalate", e) for e in ([chain] if isinstance(chain, str) else chain)]
+    for key, entry in entries:
+        if entry and routing.parse_entry(entry)[0] not in agents.REGISTRY:
+            problems.append(f"[agents] {key}: unknown agent {entry!r} (one of {', '.join(sorted(agents.REGISTRY))})")
+    reviewer, _ = routing.default_review()
+    if reviewer and reviewer not in agents.REVIEWERS:
+        problems.append(f"[agents] review: unknown reviewer {reviewer!r} (one of {', '.join(sorted(agents.REVIEWERS))})")
+    return problems
+
+
+def apply_default_review(args) -> None:
+    """[agents] review is the project's default reviewer; --review wins."""
+    if getattr(args, "review", None):
+        return
+    args.review, review_model = routing.default_review()
+    if review_model and not getattr(args, "review_model", None):
+        args.review_model = review_model
+
+
 def run_parallel(project_dir: Path, todo_path: Path, args, log_path: Path,
                  models: list[str], runs_dir: Path) -> tuple[int, list[dict]]:
     """Runs open items concurrently, one worker per model in `models`.
@@ -943,14 +1000,8 @@ def run_parallel(project_dir: Path, todo_path: Path, args, log_path: Path,
             tag = f"worker {slot}:{model}"
             log(f"[{tag}] === Item {index} ({estimate_difficulty(item.text)}): "
                 f"{item.text.splitlines()[0][:100]} ===", log_path)
-            status, record = process_item(project_dir, item, index, args, log_path,
-                                          model=model, git_lock=git_lock)
-            if status != STATUS_DONE and _should_fall_back(args, model):
-                log(f"[{tag}] {model} failed [{status}]. Escalating to {_fallback_label(args)}...", log_path)
-                status, record = process_item(project_dir, item, index, args, log_path,
-                                              model=args.fallback_model, git_lock=git_lock,
-                                              backend_override=getattr(args, "fallback_backend", "aider"))
-                record["fallback_used"] = _fallback_label(args)
+            status, record = run_routed(project_dir, item, index, args, log_path,
+                                        model=model, git_lock=git_lock, tag=tag)
             record["worker"] = slot
             record["model"] = model
             record["difficulty"] = estimate_difficulty(item.text)
@@ -1113,6 +1164,12 @@ def main(argv: list[str] | None = None) -> int:
         # than threaded through every call site, since run_editor_on_item
         # reads it from there anyway.
         config.CONFIG.setdefault("model", {})["backend"] = args.backend
+    agent_problems = check_agents_config()
+    if agent_problems:
+        for problem in agent_problems:
+            print(f"ERROR: {problem}", file=sys.stderr)
+        return 1
+    apply_default_review(args)
     if args.lite_hard_num_predict:
         config.CONFIG.setdefault("model", {})["lite_hard_num_predict"] = args.lite_hard_num_predict
     if args.lite_hard_budget_directive:
@@ -1226,12 +1283,7 @@ def main(argv: list[str] | None = None) -> int:
         index = items_processed + 1
         log(f"=== Item {index}: {item.text} ===", log_path)
 
-        status, record = process_item(project_dir, item, index, args, log_path, model=single_model)
-
-        if status != STATUS_DONE and _should_fall_back(args, single_model):
-            log(f"Model {single_model} failed [{status}]. Escalating to {_fallback_label(args)}...", log_path)
-            status, record = process_item(project_dir, item, index, args, log_path, model=args.fallback_model, backend_override=getattr(args, "fallback_backend", "aider"))
-            record["fallback_used"] = _fallback_label(args)
+        status, record = run_routed(project_dir, item, index, args, log_path, model=single_model)
 
         update_item_status(todo_path, item, status)
         record_path = record_run(runs_dir, index, record)
