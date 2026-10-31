@@ -1,6 +1,7 @@
 """Test-driven development (TDD) workflow for forge."""
 
 import re
+import subprocess
 import threading
 from pathlib import Path
 
@@ -169,10 +170,23 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
         # catches precisely without over-flagging a no-op rewrite.
         return path_matches_any(test_file, changed_files(worktree_path, red_commit))
 
+    def put_back_test(when: str) -> None:
+        """The test must stay what the red phase wrote, so an edit to it after
+        that is undone and the work is judged against the original test. It
+        used to park the item: Claude Code edits a test it thinks is wrong
+        despite being told not to, and 3 of 8 correct TDD trials parked
+        that way (2026-10-30). Undoing it keeps the check exactly as strict.
+        An implementation that only passed the edited test fails validation
+        next and parks for that."""
+        subprocess.run(["git", "checkout", red_commit, "--", test_file], cwd=str(worktree_path),
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-am", f"forge: put back {test_file} as the red phase wrote it"],
+                       cwd=str(worktree_path), capture_output=True)
+        record["test_restores"] = record.get("test_restores", 0) + 1
+        log(f"{when} changed `{test_file}`; put it back as the red phase wrote it.", log_path)
+
     if test_file_modified_since_red():
-        log(f"Green phase modified `{test_file}` despite being told not to. "
-            f"Parking: {task_text}", log_path)
-        return finish(STATUS_NEEDS_REVIEW, f"green phase modified the test file `{test_file}`")
+        put_back_test("The green phase")
 
     suspicious = suspicious_new_paths(changed_files(worktree_path, red_commit))
     if suspicious:
@@ -210,7 +224,8 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
             f"`{test_file}` pass.\n\nOriginal task:\n{task_text}\n\n"
             f"Failure output:\n{validation_msg}\n\n"
             f"Fix `{impl_file}` so the test passes. Do not modify `{test_file}` "
-            f"or touch any other file."
+            f"or touch any other file: an edit to the test is undone. If you think "
+            f"the test itself is wrong, say so in your reply instead."
         ), log_path, files=[impl_file, test_file], model=model, backend_override=backend_override)
         _accumulate_usage(record, fix_usage)
         if not fix_success:
@@ -227,8 +242,7 @@ def run_tdd_phases(project_dir: Path, worktree_path: Path, task_text: str,
                 f"continuing to the next retry if any remain.", log_path)
             continue
         if test_file_modified_since_red():
-            return finish(STATUS_NEEDS_REVIEW,
-                         f"a validation-fix retry modified the test file `{test_file}`")
+            put_back_test(f"Fix attempt {validation_attempt}")
         restore_unnamed_files(worktree_path, base, [test_file, impl_file], log_path)
         wt.restore_todo(worktree_path, base, args.todo_file)
         if test_file_modified_since_red():
