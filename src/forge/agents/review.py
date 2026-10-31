@@ -11,7 +11,9 @@ One prompt and one verdict parser for all of them. Before this, claude had
 its own prompt (with the TDD instruction and a robust parser), while ollama
 and agy shared a copied, weaker parser and never got the TDD instruction.
 """
+import json
 import subprocess
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -112,9 +114,9 @@ class OllamaReviewer:
     name = "ollama"
     DEFAULT_MODEL = "qwen3-coder:30b"
     DEFAULT_NUM_CTX = 4096
+    URL = "http://localhost:11434/api/generate"
 
     def review(self, task: ReviewTask, log) -> Verdict:
-        from .. import spec_compiler
         prompt = review_prompt(task, can_read_repo=False)
         num_ctx = int(cfg("review", "ollama_num_ctx", default=self.DEFAULT_NUM_CTX))
         # Ollama cuts a prompt longer than num_ctx without saying so, and a
@@ -124,12 +126,33 @@ class OllamaReviewer:
             log(f"ollama review prompt is ~{approx_tokens} tokens but num_ctx is {num_ctx}: Ollama "
                 f"will cut it. Raise [review] ollama_num_ctx in .aiderloop.toml.")
         try:
-            out = spec_compiler.call_ollama(model=task.model or self.DEFAULT_MODEL, prompt=prompt,
-                                            url=spec_compiler.DEFAULT_OLLAMA_URL, num_ctx=num_ctx,
-                                            num_predict=2048, timeout=90.0).strip()
-        except Exception as e:  # unreachable, timed out: the review didn't run
+            out = self._generate(task.model or self.DEFAULT_MODEL, prompt, num_ctx)
+        except (OSError, ValueError) as e:  # unreachable, timed out, bad reply: the review didn't run
             return Verdict(None, str(e))
         return _verdict(self.name, out, log)
+
+    def _generate(self, model: str, prompt: str, num_ctx: int) -> str:
+        """Its own request, not spec_compiler.call_ollama. That one calls
+        sys.exit() when Ollama is unreachable, which inside a review ended
+        the whole forge run. It also leaves thinking on: gemma4:26b, a
+        thinking model, spent its whole budget reasoning and answered with
+        nothing, so every review "gave no clear verdict" (2026-10-30).
+        Thinking stays off here; the verdict is what's asked for."""
+        payload = json.dumps({"model": model, "prompt": prompt, "stream": True, "think": False,
+                              "options": {"num_ctx": num_ctx, "num_predict": 2048}}).encode()
+        req = urllib.request.Request(self.URL, data=payload, headers={"Content-Type": "application/json"})
+        chunks = []
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            for line in resp:
+                if not line.strip():
+                    continue
+                obj = json.loads(line)
+                if obj.get("error"):
+                    raise ValueError(obj["error"])
+                chunks.append(obj.get("response", ""))
+                if obj.get("done"):
+                    break
+        return "".join(chunks).strip()
 
 
 class AgyReviewer:

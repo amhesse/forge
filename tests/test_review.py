@@ -76,18 +76,39 @@ class TestReviewers(unittest.TestCase):
             self.assertIsNone(agents.get_reviewer("claude").review(self.task, print).approved)
 
     def test_ollama_parses_and_an_exception_is_none(self):
-        with mock.patch.object(spec_compiler, "call_ollama", return_value="bad logic\nREJECT") as call:
-            self.assertIs(agents.get_reviewer("ollama").review(self.task, print).approved, False)
-        self.assertEqual(call.call_args.kwargs["model"], "m")
-        self.assertEqual(call.call_args.kwargs["num_ctx"], 4096)
-        with mock.patch.object(spec_compiler, "call_ollama", side_effect=TimeoutError("slow")):
-            self.assertIsNone(agents.get_reviewer("ollama").review(self.task, print).approved)
+        r = agents.get_reviewer("ollama")
+        with mock.patch.object(type(r), "_generate", return_value="bad logic\nREJECT") as gen:
+            self.assertIs(r.review(self.task, print).approved, False)
+        self.assertEqual(gen.call_args.args[:1] + gen.call_args.args[2:], ("m", 4096))
+        for err in (TimeoutError("slow"), ConnectionRefusedError("down"), ValueError("bad")):
+            with mock.patch.object(type(r), "_generate", side_effect=err):
+                self.assertIsNone(r.review(self.task, print).approved, err)
+
+    def test_ollama_reviewer_turns_thinking_off_and_never_exits(self):
+        # Thinking models (gemma4) answered with nothing; spec_compiler's helper sys.exit()s.
+        import io, json as _json
+        sent = {}
+
+        class Resp(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout):
+            sent.update(_json.loads(req.data))
+            return Resp(b'{"response": "fine\\nAPPROVE", "done": true}\n')
+        r = agents.get_reviewer("ollama")
+        with mock.patch.object(review.urllib.request, "urlopen", fake_urlopen):
+            self.assertIs(r.review(self.task, print).approved, True)
+        self.assertIs(sent["think"], False)
+        with mock.patch.object(review.urllib.request, "urlopen", side_effect=ConnectionRefusedError("down")):
+            self.assertIsNone(r.review(self.task, print).approved)
 
     def test_ollama_says_when_the_diff_will_not_fit(self):
         big = agents.ReviewTask("task", "+x\n" * 8000, WT)
         logged = []
-        with mock.patch.object(spec_compiler, "call_ollama", return_value="APPROVE"):
-            agents.get_reviewer("ollama").review(big, logged.append)
+        r = agents.get_reviewer("ollama")
+        with mock.patch.object(type(r), "_generate", return_value="APPROVE"):
+            r.review(big, logged.append)
         self.assertTrue(any("will cut it" in m for m in logged), logged)
 
     def test_agy_runs_in_the_worktree(self):
