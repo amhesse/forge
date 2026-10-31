@@ -80,13 +80,16 @@ was no review gate and no escalation, so this is the checks alone.
 - **Re-test with the rule and a reviewer** (the 4 TDD tasks x 2 trials):
   OpenCode with gemma4:26b reviewing merged 7/8 with nothing wrong, where
   before it had 2 wrong merges on the same tasks. Claude Code reviewed by
-  Claude merged 3/8 with nothing wrong. The rest were correct work parked by
-  forge's other TDD rules. Getting there took two reviewer fixes:
+  Claude merged 5/8 with nothing wrong, and the other 3 were wrong code caught.
+  Getting there took two reviewer fixes and one TDD change:
   - the TDD instruction now judges the implementation against the task, not
     the test's coverage (it had rejected correct code over test gaps a fix
     round can't change);
   - the Ollama reviewer turns thinking off (gemma4 had been answering with
     nothing).
+  - an edit to the test after the red phase is put back, not parked, and the
+    code is judged against the original test (Claude Code edits tests it
+    thinks are wrong; that had parked 3/8 correct trials).
 - All local runs used one RTX 3090 Ti. Claude Code and agy ran on
   subscriptions, not metered APIs.
 

@@ -233,8 +233,11 @@ commands run outside it, under forge, as now.
      `--review` (498a1c4). The TDD review instruction judges the
      implementation against the task (61cd5e3). The Ollama reviewer sends
      think=false and never sys.exit()s (3ace67c).
+   - An edit to the test after the red phase is put back, not parked
+     (944e957).
    - Re-test on the 4 TDD tasks x 2: OpenCode + gemma4 reviewer 7/8 merged,
-     0 wrong. Claude Code + Claude reviewer 3/8 merged, 0 wrong.
+     0 wrong. Claude Code + Claude reviewer 5/8 merged, 0 wrong, 3 wrong
+     caught, 0 correct work parked.
    - The SWE-bench Verified subset is still to do. It needs per-repo Docker
      images and its own harness work.
 
