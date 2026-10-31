@@ -77,6 +77,16 @@ was no review gate and no escalation, so this is the checks alone.
   `[tdd] exploring_without_review = true` opts out. With `[agents]` routing, a
   TDD item names its files and goes to `exact` (lite) anyway. The rule
   matters most when an item escalates to an exploring agent.
+- **Re-test with the rule and a reviewer** (the 4 TDD tasks x 2 trials):
+  OpenCode with gemma4:26b reviewing merged 7/8 with nothing wrong, where
+  before it had 2 wrong merges on the same tasks. Claude Code reviewed by
+  Claude merged 3/8 with nothing wrong. The rest were correct work parked by
+  forge's other TDD rules. Getting there took two reviewer fixes:
+  - the TDD instruction now judges the implementation against the task, not
+    the test's coverage (it had rejected correct code over test gaps a fix
+    round can't change);
+  - the Ollama reviewer turns thinking off (gemma4 had been answering with
+    nothing).
 - All local runs used one RTX 3090 Ti. Claude Code and agy ran on
   subscriptions, not metered APIs.
 

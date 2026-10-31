@@ -229,10 +229,12 @@ commands run outside it, under forge, as now.
    - The exploring agents merged 3 wrong changes in 96 trials (OpenCode 2,
      Claude Code 1), all TDD items whose self-written test agreed with a
      wrong implementation.
-   - Next: close that hole. Options:
-     - make `--review` mandatory for TDD items an exploring agent takes,
-       the same rule as "guarded" unscoped items;
-     - keep exploring agents out of the red phase.
+   - **Closed (2026-10-30).** An exploring agent takes a TDD item only with
+     `--review` (498a1c4). The TDD review instruction judges the
+     implementation against the task (61cd5e3). The Ollama reviewer sends
+     think=false and never sys.exit()s (3ace67c).
+   - Re-test on the 4 TDD tasks x 2: OpenCode + gemma4 reviewer 7/8 merged,
+     0 wrong. Claude Code + Claude reviewer 3/8 merged, 0 wrong.
    - The SWE-bench Verified subset is still to do. It needs per-repo Docker
      images and its own harness work.
 
